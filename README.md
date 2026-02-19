@@ -1,277 +1,221 @@
-🧠 Agent Response Choice Modeling from Chat Service Logs
-Overview
+# 🧠 Agent Response Choice Modeling from Chat Service Logs
 
-This project constructs an econometric choice dataset from raw operational chat logs of an e-commerce customer service center.
+[![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)]()
+[![Pandas](https://img.shields.io/badge/Pandas-Data%20Processing-150458.svg)]()
+[![NumPy](https://img.shields.io/badge/NumPy-Numerical%20Computing-013243.svg)]()
+[![License](https://img.shields.io/badge/License-Academic-lightgrey.svg)]()
 
-Agents in the service center simultaneously observe multiple waiting customers and decide which customer to answer next.
-We transform system event logs into structured data that allows modeling:
+---
 
-What predicts an agent choosing one waiting customer over others?
+## Overview
+This project constructs an **econometric choice dataset** from raw operational chat logs of an e-commerce customer service center using a fully Python-based data pipeline.
 
-The output of this ELT process is a dataset where each row represents a customer message competing for the agent’s attention at a specific decision moment.
+Customer service agents often observe multiple waiting customers simultaneously and must decide **which customer to respond to next**.  
+Operational event logs record system activity, but not the decision itself.
 
-The dataset can be used for:
+This repository reconstructs the agent decision environment and produces a dataset that allows modeling:
 
-Discrete choice models (Conditional Logit / Mixed Logit)
+> **What predicts an agent choosing one waiting customer over others?**
 
-Queue prioritization analysis
+The final dataset contains rows representing *competing customer messages at a specific decision moment*.
 
-Behavioral operations research
+---
 
-Service fairness and workload allocation research
+## Research Motivation
 
-Research Idea
+Whenever an agent sends a reply, an implicit prioritization occurs:
 
-At any moment an agent sends a reply, they implicitly make a selection:
+**One customer is selected from several waiting customers.**
 
-They choose one customer
-from
-several concurrently waiting customers
+We formalize this as a **choice set**:
 
-We define this moment as a:
-
-Choice Set — the set of customers available to be answered when the agent responded.
+> A *choice set* is the set of customers waiting for an agent at the exact moment the agent responds.
 
 Inside each choice set:
+- one alternative is **chosen**
+- all other waiting customers are **not chosen**
 
-One message is chosen
+This converts operational logs into a **behavioral decision dataset** suitable for discrete choice modeling.
 
-All others are not chosen
+---
 
-This converts operational data into a behavioral decision dataset.
+## Raw Data
 
-Raw Data (System Logs)
+The source data is an event-based messaging system containing:
 
-The original database is an event-based messaging system containing:
+- Customer messages
+- Agent replies
+- Assignment events
+- Session transfers
+- Session start and close events
+- Timestamps for all actions
 
-customer messages
+### Key Fields
 
-agent responses
+| Field | Description |
+|------|------|
+| `session_id` | Unique conversation |
+| `agent_id` | Assigned service agent |
+| `event_time` | Timestamp of action |
+| `event_type = 1/2` | Customer or agent |
+| `session_start_time` | When session enters the agent queue |
 
-assignment events
+The logs describe **what happened operationally**, but not **what alternatives the agent had**.  
+The main contribution of this project is reconstructing those alternatives.
 
-session transfers
+---
 
-timestamps
+## Key Definitions
 
-Important fields:
+| Term | Meaning |
+|------|------|
+| **Session** | A conversation between a customer and the service center |
+| **Session_start_time** | When a session becomes available to an agent |
+| **Choice Set** | All customers waiting at that decision moment |
+| **Chosen Observation** | The session the agent replied to |
+| **Non-Chosen Observations** | Waiting sessions not selected |
 
-session_id
+---
 
-agent_id
+## Data Construction Pipeline
 
-event_time
+The dataset is created through an ELT process implemented entirely in Python (Pandas-based processing).
 
-message_sender (agent / customer)
+### 1️⃣ Identify Decision Events
+All agent reply messages are extracted.
+agent sends message → a decision occurred
 
-assignment_time
 
-session start / end events
+Each reply becomes a choice-set anchor.
 
-The logs describe what happened operationally —
-but not what alternatives the agent had.
+Extracted:
+- `agent_id`
+- `session_id`
+- `Waiting_time`
 
-The core challenge of this project is reconstructing those alternatives.
+---
 
-Key Definitions
-Session
+### 2️⃣ Reconstruct the Waiting Queue
+For each decision moment `tᵢ`, a session is considered waiting if:
 
-A conversation between a customer and the service center.
+- last customer message time < `tᵢ`
+- agent has not replied yet
+- session assigned before `tᵢ`
+- session still open
 
-Assignment Time
+This recreates the agent’s operational queue at the time of decision.
 
-The moment a session becomes available to an agent queue.
+---
 
-Decision Moment
+### 3️⃣ Build the Choice Set
+For every reply, all waiting sessions are collected:
 
-The exact timestamp when an agent sends a reply.
+| choice_set_id | agent | session |
+|------|------|------|
 
-Choice Set
+We then label the chosen session:
+chosen = 1 if replied at tᵢ
+chosen = 0 otherwise
 
-All customers waiting for a response from that agent at the decision moment.
 
-Chosen Observation
+Each row now represents a customer the agent *could have responded to*.
 
-The customer message the agent actually replied to.
+---
 
-Non-Chosen Observations
+### 4️⃣ Feature Engineering
+For every alternative, explanatory variables are computed.
 
-Customers who were waiting but not selected.
+**Waiting Time**
+wait_time = reply_time − last_customer_message_time
 
-Data Construction Pipeline
 
-The ELT process consists of four main stages.
 
-1️⃣ Identify Agent Decision Events
 
-We first locate agent reply messages in the chat logs.
+**Queue Context**
+- queue size
+- relative queue position
+- concurrency
 
-A reply marks a real decision:
+**Agent Workload**
+- number of simultaneous sessions
 
-agent sends message  →  agent chose a customer
+**Session Characteristics**
+- session age
+- number of messages
+- sentiment (optional)
+- transfer history
 
+---
 
-Each such event becomes a choice set anchor time.
+## Final Dataset
 
-We extract:
+Each row corresponds to a candidate customer within a decision.
 
-agent_id
+| choice_set_id | agent_id | session_id | wait_time | queue_size | workload | chosen |
+|------|------|------|------|------|------|------|
+| 1042 | A12 | S88 | 95s | 4 | 3 | 1 |
+| 1042 | A12 | S91 | 40s | 4 | 3 | 0 |
+| 1042 | A12 | S93 | 12s | 4 | 3 | 0 |
+| 1042 | A12 | S99 | 7s | 4 | 3 | 0 |
 
-session_id
+### Important Property
+Within each `choice_set_id`, **exactly one observation has `chosen = 1`**.
 
-reply timestamp tᵢ
+This structure allows estimation using conditional discrete choice models.
 
-2️⃣ Reconstruct the Waiting Queue
+---
 
-For every decision moment tᵢ, we identify which customers were waiting for that agent.
-
-A customer is considered waiting if:
-
-customer last message time < tᵢ
-AND
-agent has not yet replied to that message
-AND
-session assigned to agent before tᵢ
-AND
-session not closed before tᵢ
-
-
-This step recreates the agent’s real operational queue.
-
-3️⃣ Build the Choice Set
-
-For each decision moment:
-
-We gather all sessions satisfying the waiting conditions.
-
-This produces a potential event table:
-
-choice_set_id	agent	session	waiting_start_time
-
-Then we label the chosen customer:
-
-chosen = 1  if session replied at tᵢ
-chosen = 0  otherwise
-
-
-Now each row represents:
-
-a customer the agent could have answered.
-
-4️⃣ Feature Construction
-
-We then compute explanatory variables for each alternative.
-
-Examples:
-
-Waiting Time
-wait_time = tᵢ − last_customer_message_time
-
-Queue Position
-
-Relative age in queue within the choice set.
-
-Concurrency
-
-Number of waiting customers at decision time.
-
-Agent Workload
-
-Active concurrent sessions handled by the agent.
-
-Session Characteristics
-
-session length so far
-
-number of customer messages
-
-sentiment (optional)
-
-transfer history
-
-Final Dataset Structure
-
-Each row is a candidate customer inside a decision.
-
-choice_set_id	agent_id	session_id	wait_time	queue_size	workload	chosen
-1042	A12	S88	95s	4	3	1
-1042	A12	S91	40s	4	3	0
-1042	A12	S93	12s	4	3	0
-1042	A12	S99	7s	4	3	0
-
-Important property:
-
-Within each choice_set_id, exactly one row has chosen = 1.
-
-This makes the dataset suitable for conditional logit estimation.
-
-Why This Matters
-
-Service centers usually assume agents follow FIFO queues.
+## Why This Matters
+Service systems typically assume FIFO queueing behavior.
 
 This dataset allows testing whether agents actually prioritize:
 
-long waiting customers
+- long-waiting customers
+- complex conversations
+- quick interactions
+- purchase-oriented customers
+- low-effort sessions
 
-complex customers
+The project connects:
+- Queueing theory
+- Human decision making
+- Behavioral operations research
 
-short interactions
+---
 
-customers close to purchase
-
-low effort conversations
-
-This bridges:
-
-Queueing theory
-
-Human decision making
-
-Behavioral operations
-
-Repository Structure
-/sql
-    session_reconstruction.sql
-    queue_reconstruction.sql
-    choice_set_builder.sql
-
+## Repository Structure
 /python
-    feature_engineering.py
-    workload_metrics.py
+data_cleaning.py
+session_reconstruction.py
+choice_set_construction.py
+feature_engineering.py
 
 /notebooks
-    validation.ipynb
-    dataset_sanity_checks.ipynb
+validation.ipynb
+dataset_sanity_checks.ipynb
 
 /output
-    final_choice_dataset.parquet
+final_choice_dataset.parquet
 
-Validation Checks
 
-We verify dataset correctness by:
 
-exactly 1 chosen observation per choice set
+---
 
-no future information leakage
+## How to Reproduce
 
-waiting times ≥ 0
+### 1. Clone repository
+```bash
+git clone https://github.com/<your-username>/<repo-name>.git
+cd <repo-name>
+### 2. Install dependencies
+pip install -r requirements.txt
 
-session active at decision time
+### 3. Run pipeline
 
-agent assigned before decision
+python python/data_cleaning.py
+python python/session_reconstruction.py
+python python/choice_set_construction.py
+python python/feature_engineering.py
 
-Expected Modeling
-
-The dataset is designed for:
-
-Conditional Logit
-
-Mixed Logit
-
-Hazard models
-
-Service prioritization policy learning
-
-Authors
-
-Research project conducted at [Faculty / University name]
+### Final dataset will appear in:
+/output/final_choice_dataset.parquet

@@ -8,16 +8,16 @@
 ---
 
 ## Overview
-This project constructs an **econometric choice dataset** from raw operational chat logs of an e-commerce customer service center using a fully Python-based data pipeline.
+This project constructs an **econometric choice dataset** from raw operational chat logs of an telecommunication online messeging customer service center using a fully Python-based data pipeline.
 
-Customer service agents often observe multiple waiting customers simultaneously and must decide **which customer to respond to next**.  
+Customer service workers (i.e., agents) often observe multiple waiting customers (i.e., visitors) simultaneously and must decide **which customer to respond to next**.  
 Operational event logs record system activity, but not the decision itself.
 
 This repository reconstructs the agent decision environment and produces a dataset that allows modeling:
 
 > **What predicts an agent choosing one waiting customer over others?**
 
-The final dataset contains rows representing *competing customer messages at a specific decision moment*.
+The final dataset contains rows representing *competing customer messages at a specific decision moment* -> Choice-set.
 
 ---
 
@@ -32,10 +32,10 @@ We formalize this as a **choice set**:
 > A *choice set* is the set of customers waiting for an agent at the exact moment the agent responds.
 
 Inside each choice set:
-- one alternative is **chosen**
+- one alternative (a visitior's messege) is **chosen**
 - all other waiting customers are **not chosen**
 
-This converts operational logs into a **behavioral decision dataset** suitable for discrete choice modeling.
+This converts operational logs into a **behavioral decision dataset** suitable for discrete choice modeling (a type of logistic regression that considers grouping, as in our case, by choice-sets).
 
 ---
 

@@ -22,7 +22,7 @@ def validate_n_messages(df_reg: pd.DataFrame, df_raw: pd.DataFrame) -> dict:
         "choice_set_id": [True/False]
     }
     """
-
+    print("begining validate_n_messeges")
     df_reg = df_reg.copy()
     df_raw = df_raw.copy()
 
@@ -98,6 +98,7 @@ def checker(
         "choice_set_id": [check1_bool, check2_bool, check3_bool]
     }
     """
+    print("begining Nadav's checker function")
 
     df_choicesets = df_choicesets.copy()
     raw_df = raw_df.copy()
@@ -153,7 +154,9 @@ def checker(
 
         if not chosen_session_choicesets.empty and not chosen_session_rawdata.empty:
             sucsess[key].append(
-                chosen_session_choicesets.iloc[0] == chosen_session_rawdata.iloc[0]
+                bool(
+                    chosen_session_choicesets.iloc[0] == chosen_session_rawdata.iloc[0]
+                )
             )
         else:
             sucsess[key].append(False)
@@ -164,8 +167,23 @@ def checker(
         else:
             sucsess[key].append(False)
 
-        unique_sessions_raw = filt_raw_df["id_session"].unique().tolist()
+        unique_sessions_raw = []
+        filt_raw_df = filt_raw_df[~(filt_raw_df["end_time"] == chosen_time)]
+        sessions_raw = filt_raw_df["id_session"].unique().tolist()
+
+        for session in sessions_raw:
+            df_last = (
+                filt_raw_df.sort_values("end_time")
+                .groupby("id_session", as_index=False)
+                .tail(1)
+            )
+
+            df_last = df_last[df_last["id_session"] == session]
+            if df_last["event_type"].iloc[0] == 1:
+                unique_sessions_raw.append(df_last["id_session"].iloc[0])
+
         unique_sessions_choiceses = filt_choicesets["id_session"].unique().tolist()
+
         if set(unique_sessions_raw) == set(unique_sessions_choiceses):
             sucsess[key].append(True)
         else:
@@ -174,32 +192,89 @@ def checker(
     return sucsess
 
 
+def segment_choice(df: pd.DataFrame, segment: str) -> pd.DataFrame:
+    threshold = df[segment].quantile(0.85)
+    top_ids = df.loc[df[segment] > threshold, "choice_set"].unique()
+    sampled_choicesets = pd.Series(top_ids).sample(n=5, random_state=42)
+    filtered_df = df[df["choice_set"].isin(sampled_choicesets)]
+    return filtered_df
+
+
+def choose_choicets(df: pd.DataFrame, prefix) -> pd.DataFrame:
+    """
+    This function filters df_choicesets acording to desired group of choicsets
+
+    """
+    print("begining choose_choicets function ")
+
+    try:
+        # high number of events (3 with 7 messages, 3 with 6, 1 with 3):
+        if prefix.lower() == "high_events":
+            df_grouped = df.groupby("choice_set").size().reset_index(name="count")
+
+            grouped_filt = df_grouped[df_grouped["count"] >= 5]
+            sampled_choicesets = grouped_filt["choice_set"].sample(n=5)
+            filtered_df = df[df["choice_set"].isin(sampled_choicesets)].reset_index(
+                drop=True
+            )
+
+        # Choice sets in which one of the events has a high number of n-messages (number of sequential messages in given turn, percentile 90+).
+        elif prefix.lower() == "high_n_messeges":
+            filtered_df = segment_choice(df, "n_messeges")
+        elif prefix.lower() == "high_waiting_time":
+            filtered_df = segment_choice(df, "waiting_time")
+        elif prefix.lower() == "high_workload":
+            filtered_df = segment_choice(df, "workload")
+        else:
+            return
+
+        return filtered_df
+
+    except Exception as e:
+        print(f"Failed at choose_choicets : {e}")
+
+
 def main():
-    df_reg = pd.read_csv(
-        r"C:\Users\nadid\OneDrive - Technion\Desktop\Nadav\Studies\Technion\service_systems\project\final_files\choicesets_after_customers_msg_unified_21_03.csv"
-    )
-    df_raw = pd.read_csv(
-        r"C:\Users\nadid\OneDrive - Technion\Desktop\Nadav\Studies\Technion\service_systems\project\final_files\merged_session_events.csv"
-    )
+    try:
+        print("reading reg...")
+        df_reg = pd.read_csv(
+            r"C:\Users\nadid\OneDrive - Technion\Desktop\Nadav\Studies\Technion\service_systems\project\final_files\choicesets_after_customers_msg_unified_21_03.csv"
+        )
+        print("reading df_raw...")
 
-    my_result = validate_n_messages(df_reg, df_raw)
+        # define specific columns since reading the df takes time:
+        cols = [" end_time", " event_type", " id_session", " end_date", " id_rep"]
+        df_raw = pd.read_csv(
+            r"C:\Users\nadid\OneDrive - Technion\Desktop\Nadav\Studies\Technion\service_systems\project\final_files\merged_session_events.csv",
+            usecols=cols,
+        )
+        print("read both dfs")
 
-    choicesets_list = sorted(df_reg["choice_set"].unique().tolist())
-    colleague_result = checker(choicesets_list, df_reg, df_raw)
+        needed_choicesets = "high_events"
+        df_reg = choose_choicets(df_reg, needed_choicesets)
+        # Insert a logic that fetches and cleans df_choicests acording to selected choicests
 
-    print("\nMY FUNCTION RESULT:")
-    for choice_set, results in my_result.items():
-        if all(results):
-            print(f"{choice_set}: SUCCESS -> {results}")
-        else:
-            print(f"{choice_set}: FAILURE -> {results}")
+        my_result = validate_n_messages(df_reg, df_raw)
 
-    print("\nCOLLEAGUE FUNCTION RESULT:")
-    for choice_set, results in colleague_result.items():
-        if all(results):
-            print(f"{choice_set}: SUCCESS -> {results}")
-        else:
-            print(f"{choice_set}: FAILURE -> {results}")
+        choicesets_list = sorted(df_reg["choice_set"].unique().tolist())
+        colleague_result = checker(choicesets_list, df_reg, df_raw)
+
+        print("\n FIRST FUNCTION RESULT:")
+        for choice_set, results in my_result.items():
+            if all(results):
+                print(f"{choice_set}: SUCCESS -> {results}")
+            else:
+                print(f"{choice_set}: FAILURE -> {results}")
+
+        print("\n SECOND FUNCTION RESULT:")
+        for choice_set, results in colleague_result.items():
+            if all(results):
+                print(f"{choice_set}: SUCCESS -> {results}")
+            else:
+                print(f"{choice_set}: FAILURE -> {results}")
+
+    except Exception as e:
+        print(f"Failed at main function: {e}")
 
 
 if __name__ == "__main__":

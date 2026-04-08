@@ -62,13 +62,14 @@ def checker(
 
 
 def main():
+
     # Enter you local path here
     df_choicesets = pd.read_csv(r"ENTER PATH HERE")
     # Create choice-time var:
     df_choicesets["chosen_time"] = (
         df_choicesets["end_time"] + df_choicesets["waiting_time"]
     )
-    # Enter you local path here - I use usecols becuse this df is huge and it takes time to read it, thus I only load columns I work with
+    # ENTER PATH HERE - I use usecols because this df is huge and it takes time to read it, thus I only load columns I work with:
     raw_df = pd.read_csv(
         r"ENTER PATH HERE",
         usecols=[

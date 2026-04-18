@@ -1,0 +1,47 @@
+# ==============================
+# Algorithm checker
+# ==============================
+
+import pandas as pd
+import glob
+import os
+import numpy as np
+import matplotlib.pyplot as plt
+import time
+from ast import literal_eval
+
+
+''' 
+The function should receive a list of choicesets and output the success of each choice-set, including other desired details. 
+
+One important open question that we need to think about is: 
+What is the definition of success? 
+
+A possible algorithm I thought about:
+
+- For each choice-set calculate the chosen time (will be the same for each message in the choiceset).
+- Choose a list of choice-sets according to the following: 
+  * high number of events (3 with 7 messages, 3 with 6, 1 with 3)
+  * Choice sets in which one of the events has a high number of n-messages (number of sequential messages in given turn, percentile 90+).
+  * Choice sets in which one of the events has a high waiting time (7 of these, percentile 85/90+), in addition, one or two choice sets where the waiting time of the chosen message is high/low (below 10 percentile).
+  * Creation of a n-messages_agents and then choosing choice-sets with high/low n-messages_agents for the response message.
+  [Creation of a table that describes agent messages that choose messages, FK = choice_id]
+  * Choice sets with high/low workload (above percentile 85, below 25)
+- The function will return a dataframe of choice sets, where the n of choice sets is according to the dynamic rule specified in the function.
+
+- Clean the raw data: filter undesired event_types (7,8,9), clean spaces in namings and sort by event_time.
+- Filter the raw data (sessions events merged) for each session in the choiceset, from the event time of that id_session until the chosen time of that agent.
+
+- Success criteria:
+1. The id_session of the event in the choice_set that has chosen = 1 should be the same id_session that has an event_type_desc of rep_line (event_type = 2).
+2. n_messages = number of messages by id_session in raw data: Comaprison of n_messages in df_reg to the number of messages in raw data that appear in each choice set, according to each id_session.
+3. All events in choice_set have end_time lower than the choosing event (rep_line) in raw data.
+4. event_type = 2 must be only 1 in the filtered time interval in df_raw (rep_line count = 1).
+5. count of unique id_sessions is same between reg and raw data.
+6. Aggregation of variables in agg messages is valid.
+
+
+
+- For every unsuccessful choice set, log each failed criteria.
+- ⁠Check if there were any agent messages after that customer's message of that choiceset. If no -> success.
+'''

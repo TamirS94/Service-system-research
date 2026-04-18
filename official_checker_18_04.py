@@ -1,8 +1,10 @@
 import pandas as pd
 import os
-pd.set_option('display.max_columns', None)
-pd.set_option('display.max_rows', 500)
+
+pd.set_option("display.max_columns", None)
+pd.set_option("display.max_rows", 500)
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
+
 
 def validate_n_messages(df_reg: pd.DataFrame, df_raw: pd.DataFrame) -> dict:
     """
@@ -44,8 +46,6 @@ def validate_n_messages(df_reg: pd.DataFrame, df_raw: pd.DataFrame) -> dict:
             raise ValueError(
                 "df_reg must contain either 'chosen_time' or 'waiting_time'."
             )
-
-
 
     raw_groups = dict(tuple(df_raw.groupby("id_session")))
     success = {}
@@ -193,7 +193,9 @@ def checker(
     return sucsess
 
 
-def segment_choice(df: pd.DataFrame, segment: str, quantile: int, prefix: str) -> pd.DataFrame:
+def segment_choice(
+    df: pd.DataFrame, segment: str, quantile: int, prefix: str
+) -> pd.DataFrame:
     try:
         threshold = df[segment].quantile(quantile)
         low_list = ["low_waiting_time", "low_workload", "low_n_messages"]
@@ -210,8 +212,6 @@ def segment_choice(df: pd.DataFrame, segment: str, quantile: int, prefix: str) -
         return filtered_df
     except Exception as e:
         print(f"Failed at segment_choice : {e}")
-
-
 
 
 def choose_choicets(df: pd.DataFrame, prefix: str) -> pd.DataFrame:
@@ -254,32 +254,40 @@ def choose_choicets(df: pd.DataFrame, prefix: str) -> pd.DataFrame:
         print(f"Failed at choose_choicets : {e}")
 
 
-def main(specific_check=False):
+def main(specific_check=True):
     try:
         print("reading reg...")
+
         df_reg = pd.read_csv(
-            r"choicesets_after_customers_msg_unified_21_03.csv"
+            r"C:\Users\nadid\OneDrive - Technion\Desktop\Nadav\Studies\Technion\service_systems\project\final_files\choicesets_after_customers_msg_unified_21_03.csv"
         )
         print("reading df_raw...")
-
+        cols = [" end_time", " event_type", " id_session", " end_date", " id_rep"]
         # define specific columns since reading the df takes time:
         df_raw = pd.read_csv(
-            r"merged_session_events.csv"
+            r"C:\Users\nadid\OneDrive - Technion\Desktop\Nadav\Studies\Technion\service_systems\project\final_files\merged_session_events.csv",
+            usecols=cols,
         )
+        df_raw.columns = df_raw.columns.str.replace(" ", "")
         print("read both dfs")
-        prefix_list = ["high_n_messages", "high_waiting_time", "high_workload",
-                       "low_waiting_time", "low_n_messages", "low_workload"]
+        prefix_list = [
+            "high_n_messages",
+            "high_waiting_time",
+            "high_workload",
+            "low_waiting_time",
+            "low_n_messages",
+            "low_workload",
+        ]
         for prefix in prefix_list:
             print("")
             print(f"Current segmentation: {prefix}")
             needed_choicesets = prefix
             # Insert a logic that fetches and cleans df_choicests acording to selected choicests
-    #### SPECIFIC CHECKER: #####
+            #### SPECIFIC CHECKER: #####
             if specific_check:
-                df_reg_filt = df_reg[df_reg['choice_set'] == 345831]
+                df_reg_filt = df_reg[df_reg["choice_set"] == 1310541]
             else:
                 df_reg_filt = choose_choicets(df_reg, needed_choicesets)
-
 
             my_result = validate_n_messages(df_reg_filt, df_raw)
 

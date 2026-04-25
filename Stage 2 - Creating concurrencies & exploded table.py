@@ -51,6 +51,7 @@ def uniqe(merged_df, merged_sessions):
 
 merged_sessions = uniqe(merged_df, merged_sessions).reset_index(drop=True)
 print(f"   Sessions after filtering: {merged_sessions.shape[0]:,} rows")
+print(f"   Unique sessions in merged_sessions: {merged_sessions['id_session'].nunique():,}")
 print(f"   Unique sessions in merged_df: {merged_df['id_session'].nunique():,}")
 
 # ------------------------------
@@ -58,15 +59,33 @@ print(f"   Unique sessions in merged_df: {merged_df['id_session'].nunique():,}")
 # ------------------------------
 print("\n🔗 Merging session time windows into events table...")
 
-columns_to_keep = ['chat_end_time', 'chat_start_time', 'id_session', 'chat_start_date', 'chat_end_date']
-df_columns_to_keep = merged_sessions[columns_to_keep]
+session_level_columns = ['chat_end_time', 'chat_start_time', 'id_session', 'chat_start_date', 'chat_end_date', 'subsession', 'id_rep']
+df_session_level = merged_sessions[session_level_columns]
+cols = ['id_session', 'id_rep']
 
-df_merged = merged_df.merge(df_columns_to_keep, on='id_session', how='left')
+keys_merged_df = set(
+    merged_df[cols].dropna().drop_duplicates().itertuples(index=False, name=None)
+)
+
+keys_merged_sessions = set(
+    merged_sessions[cols].dropna().drop_duplicates().itertuples(index=False, name=None)
+)
+
+same_keys = keys_merged_df == keys_merged_sessions
+
+print("Same session-rep-subsession combinations:", same_keys)
+
+df_merged = merged_df.merge(df_session_level, on=cols, how='left', indicator=True)
 print(f"   After merge: {df_merged.shape[0]:,} rows")
+print(len(merged_df), len(df_merged))
 
 # Filter to event end_time inside session time window
 print("\n⏱️  Filtering events within session active time window...")
 before = df_merged.shape[0]
+df_filtered_not = df_merged[~(
+    (df_merged['end_time'] >= df_merged['chat_start_time']) &
+    (df_merged['end_time'] <= df_merged['chat_end_time'])
+)]
 df_filtered = df_merged[
     (df_merged['end_time'] >= df_merged['chat_start_time']) &
     (df_merged['end_time'] <= df_merged['chat_end_time'])

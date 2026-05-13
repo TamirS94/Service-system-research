@@ -54,6 +54,7 @@ def uniqe(merged_df, merged_sessions):
 
 merged_sessions = uniqe(merged_df, merged_sessions).reset_index(drop=True)
 print(f"   Sessions after filtering: {merged_sessions.shape[0]:,} rows")
+print(f"   Unique sessions in merged_sessions: {merged_sessions['id_session'].nunique():,}")
 print(f"   Unique sessions in merged_df: {merged_df['id_session'].nunique():,}")
 
 # ------------------------------
@@ -69,9 +70,25 @@ columns_to_keep = [
     "chat_end_date",
 ]
 df_columns_to_keep = merged_sessions[columns_to_keep]
+session_level_columns = ['chat_end_time', 'chat_start_time', 'id_session', 'chat_start_date', 'chat_end_date', 'subsession', 'id_rep']
+df_session_level = merged_sessions[session_level_columns]
+cols = ['id_session', 'id_rep']
 
-df_merged = merged_df.merge(df_columns_to_keep, on="id_session", how="left")
+keys_merged_df = set(
+    merged_df[cols].dropna().drop_duplicates().itertuples(index=False, name=None)
+)
+
+keys_merged_sessions = set(
+    merged_sessions[cols].dropna().drop_duplicates().itertuples(index=False, name=None)
+)
+
+same_keys = keys_merged_df == keys_merged_sessions
+
+print("Same session-rep-subsession combinations:", same_keys)
+
+df_merged = merged_df.merge(df_session_level, on=cols, how='left', indicator=True)
 print(f"   After merge: {df_merged.shape[0]:,} rows")
+print(len(merged_df), len(df_merged))
 
 # Filter to event end_time inside session time window
 print("\n⏱️  Filtering events within session active time window...")
@@ -83,15 +100,20 @@ df_filtered = df_merged[
 after = df_filtered.shape[0]
 print(f"   Filtered out-of-window events: {before - after:,} rows")
 print(f"   Remaining: {after:,} rows")
+bool_filt = (df_merged['end_time'] >= df_merged['chat_start_time']) & (df_merged['end_time'] <= df_merged['chat_end_time'])
+df_merged['isin_session_timeframe'] = np.where(bool_filt, 1, 0)
+df_after_tag = df_merged.copy()
+print(f"   Tagged out-of-window events: {df_after_tag[df_after_tag['isin_session_timeframe'] == 0].shape[0]} rows")
+print(f"   In-window_events: {df_after_tag[df_after_tag['isin_session_timeframe'] == 1].shape[0],} rows")
 
 # ------------------------------
 # 4️⃣ Remove duplicates after merge/filter
 # ------------------------------
 print("\n🧽 Removing duplicated event_id rows (post-merge duplicates)...")
-before = df_filtered.shape[0]
+before = df_after_tag.shape[0]
 
-df_dup_events = df_filtered[df_filtered["event_id"].duplicated()]
-df_no_dupes = df_filtered[~df_filtered["event_id"].isin(df_dup_events["event_id"])]
+df_dup_events = df_after_tag[df_after_tag['event_id'].duplicated()]
+df_no_dupes = df_after_tag[~df_after_tag['event_id'].isin(df_dup_events['event_id'])]
 
 after = df_no_dupes.shape[0]
 print(f"   Removed duplicates: {before - after:,} rows")
@@ -140,7 +162,7 @@ print(f"   Aggregated concurrency df: {aggregated_df.shape[0]:,} rows")
 
 end_time = time.time()
 print(f"   Concurrency stage time: {end_time - start_time:.2f} seconds")
-
+##### Analyzing incident of missing chosen event of id_session: 100144015, id_rep: 30000683 chosen_date:  28/05/2017 01:48:58
 # ------------------------------
 # 7️⃣ Workload variable
 # ------------------------------

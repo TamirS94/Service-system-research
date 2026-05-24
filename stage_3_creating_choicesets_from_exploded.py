@@ -21,13 +21,12 @@ A SHORT READ ME BEFORE RUNNING THIS CODE:
 
 # Load merged df and exploded here:
 merged_df = pd.read_csv(
-    "./df_1_not_merged_2_merged_04_1_26.csv",
-    usecols=[" id_session", " event_type", " end_date", " end_time"],
+    "df_1_not_merged_2_merged.csv"
 )
-df_exploded = pd.read_csv("./df_exploded.csv")
+df_exploded = pd.read_csv("df_exploded_all_data.csv")
 today_str = datetime.today().strftime("%d_%m_%Y")
 
-
+ 
 def main(merged_df: pd.DataFrame, df_exploded: pd.DataFrame, today_str: str):
     logging.basicConfig(level=logging.INFO, filename=f"big_code_{today_str}.txt")
     # Start timing
@@ -97,7 +96,7 @@ def main(merged_df: pd.DataFrame, df_exploded: pd.DataFrame, today_str: str):
     # STEP 3: Combine and save
     if filtered_events_list:
         all_filtered_events = pd.concat(filtered_events_list, ignore_index=True)
-        all_filtered_events.to_csv(f"df_choicesets_{today_str}", index=False)
+        all_filtered_events.to_csv(f"df_choicesets_{today_str}.csv", index=False)
     else:
         logger.info("No filtered events found.")
 

@@ -7,6 +7,9 @@ import logging
 logger = logging.getLogger(__name__)
 warnings.filterwarnings("ignore")
 
+COLS_TO_SUM = ["sentiment", "duration", "number_words", "number_chars", "number_lines"]
+COLS_TO_DROP = ["read_date", "read_time", "accept_date", "accept_time", "delay"]
+
 
 """
 A SHORT READ ME BEFORE RUNNING THIS CODE:
@@ -68,28 +71,45 @@ def main(merged_df: pd.DataFrame, df_exploded: pd.DataFrame, today_str: str):
             logger.info("--------------------------------------")
             continue
 
-        # Get the latest event
-        closest_time = past_events["end_time"].max()
-        filtered_event = past_events[past_events["end_time"] == closest_time]
+        # Collect all consecutive type=1 messages since the last agent reply
+        past_type2 = past_events[past_events["event_type"] == 2]
 
-        # Keep only event_type == 1
-        filtered_event = filtered_event[filtered_event["event_type"] == 1]
-
-        if not filtered_event.empty:
-            # Enrich the row
-            filtered_event = filtered_event.assign(
-                choice_set=row.index,
-                chosen=row.chosen,
-                waiting_time=row.time - filtered_event["end_time"],
-                workload=row.workload,
-            )
-
-            filtered_events_list.append(filtered_event)
-            logger.info(
-                f"Enriched filtered events list by 1 row: {row.concurrent_sessions}, {row.chosen}, {row.time}"
-            )
+        if past_type2.empty:
+            consecutive_type1 = past_events[past_events["event_type"] == 1]
         else:
-            logger.info("Closet time row is not event_type = 1, continuing.....")
+            last_agent_reply_time = past_type2["end_time"].max()
+            consecutive_type1 = past_events[
+                (past_events["event_type"] == 1) &
+                (past_events["end_time"] > last_agent_reply_time)
+            ]
+
+        if consecutive_type1.empty:
+            logger.info("No pending visitor messages since last agent reply, skipping.")
+            logger.info("--------------------------------------")
+            continue
+
+        consecutive_type1 = consecutive_type1.sort_values("end_time").reset_index(drop=True)
+        aggregated_row = consecutive_type1.iloc[[0]].copy()
+        for col in COLS_TO_SUM:
+            if col in aggregated_row.columns:
+                aggregated_row[col] = consecutive_type1[col].sum()
+        aggregated_row["n_messages"] = len(consecutive_type1)
+        cols_to_drop_present = [c for c in COLS_TO_DROP if c in aggregated_row.columns]
+        aggregated_row = aggregated_row.drop(columns=cols_to_drop_present)
+
+        first_end_time = aggregated_row["end_time"].iloc[0]
+        aggregated_row = aggregated_row.assign(
+            choice_set=row.index,
+            chosen=row.chosen,
+            waiting_time=row.time - first_end_time,
+            workload=row.workload,
+        )
+
+        filtered_events_list.append(aggregated_row)
+        logger.info(
+            f"Enriched filtered events list by 1 row: {row.concurrent_sessions}, {row.chosen}, "
+            f"n_messages={aggregated_row['n_messages'].iloc[0]}, waiting_time={row.time - first_end_time}"
+        )
 
         logger.info("--------------------------------------")
 

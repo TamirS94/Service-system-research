@@ -254,13 +254,11 @@ def choose_choicets(df: pd.DataFrame, prefix: str) -> pd.DataFrame:
         print(f"Failed at choose_choicets : {e}")
 
 
-def main(specific_check=True):
+def main(specific_check=False):
     try:
         print("reading reg...")
 
-        df_reg = pd.read_csv(
-            r"C:\Users\nadid\OneDrive - Technion\Desktop\Nadav\Studies\Technion\service_systems\project\final_files\choicesets_after_customers_msg_unified_21_03.csv"
-        )
+        df_reg = pd.read_csv(r"C:\Users\nadid\Downloads\df_choicesets_18_05_2026.csv")
         print("reading df_raw...")
         cols = [" end_time", " event_type", " id_session", " end_date", " id_rep"]
         # define specific columns since reading the df takes time:

@@ -5,7 +5,7 @@ import time
 logging.basicConfig(level=logging.INFO)
 
 
-choicesets = pd.read_csv(r"C:\Users\nadid\Downloads\all_filtered_events_3m_f.csv")
+choicesets = pd.read_csv(r"C:\Users\nadid\Downloads\df_choicesets_18_05_2026.csv")
 logging.info(f"There are {choicesets.shape[0]} rows in choicests_df")
 
 """

@@ -212,7 +212,7 @@ Stage 2 - Creating concurrencies & exploded table.py                     ← con
 stage_3_creating_choicesets_from_exploded.py                             ← consecutive visitor message aggregation, final choice-set table
 official_checker_18_04.py                                                ← validation functions (validate_n_messages, checker)
 Algorithem_Checker.txt                                                   ← algorithm documentation
-big_code_<date>.txt                                                      ← Stage 3 run log (generated on execution)
+claude_30_5.md                                                           ← working session conversation log
 ```
 
 ---

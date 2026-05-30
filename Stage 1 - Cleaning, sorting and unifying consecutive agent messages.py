@@ -74,6 +74,30 @@ def replace_rep_ids(group):
 session_events_merged = session_events_merged.groupby(['id_session', 'subsession']).apply(replace_rep_ids).reset_index(drop=True)
 print("\n rep_id fix implemented")
 
+# ------------------------------
+# 2️⃣b Event type 7 fix: propagate type=7 end_time/end_date to preceding type=1, then drop type=7
+# ------------------------------
+# event_type=7 marks when a customer leaves the queue and the agent first sees their message.
+# The end_time of the type=1 event is therefore updated to the type=7 end_time so that
+# waiting_time in Stage 3 reflects the true moment the agent could act on the session.
+print("\n⚙️  Applying event_type=7 fix...")
+
+session_events_merged = session_events_merged.sort_values(['id_session', 'end_time']).reset_index(drop=True)
+
+session_events_merged['_next_event_type'] = session_events_merged.groupby('id_session')['event_type'].shift(-1)
+session_events_merged['_next_end_time'] = session_events_merged.groupby('id_session')['end_time'].shift(-1)
+session_events_merged['_next_end_date'] = session_events_merged.groupby('id_session')['end_date'].shift(-1)
+
+type7_mask = (session_events_merged['event_type'] == 1) & (session_events_merged['_next_event_type'] == 7)
+session_events_merged.loc[type7_mask, 'end_time'] = session_events_merged.loc[type7_mask, '_next_end_time']
+session_events_merged.loc[type7_mask, 'end_date'] = session_events_merged.loc[type7_mask, '_next_end_date']
+
+session_events_merged = session_events_merged.drop(columns=['_next_event_type', '_next_end_time', '_next_end_date'])
+
+before = len(session_events_merged)
+session_events_merged = session_events_merged[session_events_merged['event_type'] != 7].reset_index(drop=True)
+print(f"   Updated {type7_mask.sum():,} type=1 rows with type=7 end_time/end_date")
+print(f"   Dropped {before - len(session_events_merged):,} type=7 rows. Remaining: {len(session_events_merged):,}")
 
 # ------------------------------
 # 3️⃣ Sorting, exporting and Splitting

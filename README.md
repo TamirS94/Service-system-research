@@ -207,12 +207,12 @@ The project connects:
 ## Repository Structure
 
 ```
-Stage 1 - Cleaning, sorting and unifying consecutive agent messages.py
-Stage 1 - Cleaning, sorting and unifying consecutive agent messages_v2.py   ← event_type=7 fix applied
-Stage 2 - Creating concurrencies & exploded table.py
-stage_3_creating_choicesets_from_exploded.py                                 ← consecutive message aggregation
-official_checker_18_04.py                                                    ← validation functions
-choicests_after_unification_customer_msgs_21_03.py                           ← post-hoc unification reference
+Stage 1 - Cleaning, sorting and unifying consecutive agent messages.py   ← cleaning, rep_id fix, event_type=7 fix, agent message merging
+Stage 2 - Creating concurrencies & exploded table.py                     ← concurrency extraction, exploded choice-set table
+stage_3_creating_choicesets_from_exploded.py                             ← consecutive visitor message aggregation, final choice-set table
+official_checker_18_04.py                                                ← validation functions (validate_n_messages, checker)
+Algorithem_Checker.txt                                                   ← algorithm documentation
+big_code_<date>.txt                                                      ← Stage 3 run log (generated on execution)
 ```
 
 ---

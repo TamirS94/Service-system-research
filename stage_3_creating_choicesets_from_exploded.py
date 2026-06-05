@@ -44,7 +44,7 @@ def main(merged_df: pd.DataFrame, df_exploded: pd.DataFrame, today_str: str):
     merged_df.columns = merged_df.columns.str.strip()
     df_exploded.columns = df_exploded.columns.str.strip()
     # Sort for efficient filtering
-    merged_df = merged_df.sort_values(["id_session", "end_time", 'event_type'] ascending= [True, True, False])
+    merged_df = merged_df.sort_values(["id_session", "end_time", 'event_type'], ascending= [True, True, False])
 
     # Group by session for fast access
     logger.info(

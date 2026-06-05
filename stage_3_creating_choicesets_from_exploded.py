@@ -16,16 +16,21 @@ A SHORT READ ME BEFORE RUNNING THIS CODE:
 
 1. The files that need to be inputed to this run are: exploded and df_1_not_merged_2_merged_04_1_26.
 2. I recommand putting the files in the directory (the pwd that you are working on - git hub folder) with the names founded in the read.csv
-3. Since we are checking Please verify that both files you input contain the missing row: 
-    session 100209964 of in choice-set 1106139, id_rep: 30000683 chosen_date: 28/05/2017 01:48:37
-4. This code runs with a logger, meaning that logs will not appear in the terminal, but will create a text files with all logs.
-5. That way we can look excactly what happend for each run in the code. 
+3. This code runs with a logger, meaning that logs will not appear in the terminal, but will create a text files with all logs.
+4. That way we can look excactly what happend for each run in the code. 
+5. IMPORTANT - verify the df_1_not_merged_2_merged.csv (or after stage 1 df) is ordered by the following logic:
+
+id_session desc/asc
+end_time ordered asc
+event_type desc
+
 """
 
 # Load merged df and exploded here:
 merged_df = pd.read_csv(
     "df_1_not_merged_2_merged.csv"
 )
+
 df_exploded = pd.read_csv("df_exploded_all_data.csv")
 today_str = datetime.today().strftime("%d_%m_%Y")
 
@@ -39,7 +44,7 @@ def main(merged_df: pd.DataFrame, df_exploded: pd.DataFrame, today_str: str):
     merged_df.columns = merged_df.columns.str.strip()
     df_exploded.columns = df_exploded.columns.str.strip()
     # Sort for efficient filtering
-    merged_df = merged_df.sort_values(["id_session", "end_time"])
+    merged_df = merged_df.sort_values(["id_session", "end_time", 'event_type'] ascending= [True, True, False])
 
     # Group by session for fast access
     logger.info(

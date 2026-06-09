@@ -36,9 +36,6 @@ def validate_n_messages(df_reg: pd.DataFrame, df_raw: pd.DataFrame) -> dict:
 
     df_raw = df_raw[df_raw["event_type"].isin([1, 2])].copy()
 
-    # df_reg["end_time"] = pd.to_datetime(df_reg["end_time"])
-    # df_raw["end_time"] = pd.to_datetime(df_raw["end_time"])
-
     if "chosen_time" not in df_reg.columns:
         if "waiting_time" in df_reg.columns:
             df_reg["chosen_time"] = df_reg["end_time"] + df_reg["waiting_time"]
@@ -63,13 +60,27 @@ def validate_n_messages(df_reg: pd.DataFrame, df_raw: pd.DataFrame) -> dict:
                 all_rows_valid = False
                 continue
 
-            interval_raw = session_raw[
-                (session_raw["end_time"] >= row.end_time)
-                & (session_raw["end_time"] <= row.chosen_time)
-            ].sort_values("end_time")
+            # Mirror Stage 3 v2 logic: find last type=2 before chosen_time, then
+            # count type=1 events after it. This avoids dependence on row.end_time,
+            # which was updated to the type=7 timestamp in Stage 1 and no longer
+            # matches the original type=1 end_time in the raw data.
+            past_type2 = session_raw[
+                (session_raw["event_type"] == 2) &
+                (session_raw["end_time"] < row.chosen_time)
+            ]
+            last_type2_time = past_type2["end_time"].max() if not past_type2.empty else -1
 
-            raw_message_count = (interval_raw["event_type"] == 1).sum()
-            event_type_2_count = (interval_raw["event_type"] == 2).sum()
+            raw_message_count = session_raw[
+                (session_raw["event_type"] == 1) &
+                (session_raw["end_time"] > last_type2_time) &
+                (session_raw["end_time"] < row.chosen_time)
+            ].shape[0]
+
+            event_type_2_count = session_raw[
+                (session_raw["event_type"] == 2) &
+                (session_raw["end_time"] > last_type2_time) &
+                (session_raw["end_time"] <= row.chosen_time)
+            ].shape[0]
 
             if row.chosen == 1:
                 is_valid = (
@@ -107,7 +118,7 @@ def checker(
     df_choicesets.columns = df_choicesets.columns.str.strip()
     raw_df.columns = raw_df.columns.str.strip()
 
-    raw_df = raw_df[raw_df["event_type"].isin([1, 2])].copy()
+    raw_df = raw_df[raw_df["event_type"].isin([1, 2, 7])].copy()
 
     df_choicesets["end_time"] = pd.to_datetime(df_choicesets["end_time"])
     raw_df["end_time"] = pd.to_datetime(raw_df["end_time"])
@@ -180,7 +191,7 @@ def checker(
             )
 
             df_last = df_last[df_last["id_session"] == session]
-            if df_last["event_type"].iloc[0] == 1:
+            if df_last["event_type"].iloc[0] in [1, 7]:
                 unique_sessions_raw.append(df_last["id_session"].iloc[0])
 
         unique_sessions_choiceses = filt_choicesets["id_session"].unique().tolist()
@@ -254,16 +265,16 @@ def choose_choicets(df: pd.DataFrame, prefix: str) -> pd.DataFrame:
         print(f"Failed at choose_choicets : {e}")
 
 
-def main(specific_check=False):
+def main(specific_check=True):
     try:
         print("reading reg...")
 
-        df_reg = pd.read_csv(r"C:\Users\nadid\Downloads\df_choicesets_18_05_2026.csv")
+        df_reg = pd.read_csv(r"E:\github\df_choicesets_06_05_2026.csv")
         print("reading df_raw...")
-        cols = [" end_time", " event_type", " id_session", " end_date", " id_rep"]
+        cols = ["end_time", "event_type", "id_session", "end_date", "id_rep"]
         # define specific columns since reading the df takes time:
         df_raw = pd.read_csv(
-            r"C:\Users\nadid\OneDrive - Technion\Desktop\Nadav\Studies\Technion\service_systems\project\final_files\merged_session_events.csv",
+            r"E:\github\agents_merged_fixed_28_5.csv",
             usecols=cols,
         )
         df_raw.columns = df_raw.columns.str.replace(" ", "")
@@ -283,7 +294,7 @@ def main(specific_check=False):
             # Insert a logic that fetches and cleans df_choicests acording to selected choicests
             #### SPECIFIC CHECKER: #####
             if specific_check:
-                df_reg_filt = df_reg[df_reg["choice_set"] == 1310541]
+                df_reg_filt = df_reg[df_reg["choice_set"] == 302733]
             else:
                 df_reg_filt = choose_choicets(df_reg, needed_choicesets)
 

@@ -23,18 +23,21 @@ logging.basicConfig(level=logging.INFO)
 
 def clean_data(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Deletes silent abandonment (shortcut: sa) (outcome = 4), and event types 7 & 8
+    Drops rows irrelevant to the choice model:
+      - outcome=4 (known abandonment): customer closed window before service started.
+      - event_type 8 (other_time) / 9 (inner_wait): agent parallel-chat overhead, no customer content.
+
+    Note: event_type 7 is NOT dropped here — see event_type_7_fix().
     """
     logger.info("\n🧹 Cleaning data...")
     before = df.shape[0]
-    df = df[df["outcome"] != 4].reset_index(drop=True)  # TODO Check that 4 indicates sa
+    df = df[df["outcome"] != 4].reset_index(drop=True)
     after = df.shape[0]
     logger.info(f"   Removed silent abandonment: {before - after:,} rows")
 
     # Drop event types 8 and 9
     before = df.shape[0]
-    dele = df[(df["event_type"] == 8) | (df["event_type"] == 9)].index
-    df.drop(dele, inplace=True)  # TODO Why arent we just filtering here?
+    df = df[~df["event_type"].isin([8, 9])].reset_index(drop=True)
     after = df.shape[0]
     logger.info(f"   Removed event types 8 & 9: {before - after:,} rows")
     return df

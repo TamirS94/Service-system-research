@@ -4,12 +4,11 @@
 
 # Imports and enviorments set up:
 import pandas as pd
-import glob
 import os
-import numpy as np
 import time
 import logging
 from datetime import date
+from agent_unification import unify_agent_messages
 
 pd.set_option("display.max_columns", None)
 pd.set_option("display.max_rows", 500)
@@ -43,37 +42,23 @@ def clean_data(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-# For each session, find the first non-1 id_rep value and use it to replace 1s
-def _replace_rep_ids(group: pd.DataFrame) -> pd.DataFrame:
-    """
-    This is a helper function for entire rep_fix one function below....
-
-    Context: We Identified that when customers send the initial message their rep_id (associated agent) shows as 1 before being assigned.
-    However,That message is relevant for the choice model we intend to create.
-    Get the first non-1 id_rep value in the session
-    """
-    logger.info("\n Initiating rep_id fix")
-    # Run on the session and find the earliest non 1 id_rep:
-    first_non_one = (
-        group[group["id_rep"] != 1]["id_rep"].iloc[0]
-        if not group[group["id_rep"] != 1].empty
-        else 1
-    )
-    # Replace all 1s in this session with the first non-1 id_rep
-    group.loc[group["id_rep"] == 1, "id_rep"] = first_non_one
-    return group
-
-
 def rep_fix(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Applying the helper function: _replace_rep_ids
+    Replaces placeholder id_rep=1 with the actual assigned agent ID per (id_session, subsession).
+    Early customer messages arrive before agent assignment and carry id_rep=1; this propagates
+    the first real agent ID back to those rows.
     """
-    # Apply the function to each session:
-    df = (
-        df.groupby(["id_session", "subsession"])
-        .apply(_replace_rep_ids)
-        .reset_index(drop=True)
+    logger.info("\n Initiating rep_id fix")
+    real_reps = (
+        df[df["id_rep"] != 1]
+        .groupby(["id_session", "subsession"])["id_rep"]
+        .first()
+        .rename("_real_rep")
     )
+    df = df.merge(real_reps, on=["id_session", "subsession"], how="left")
+    mask = (df["id_rep"] == 1) & df["_real_rep"].notna()
+    df.loc[mask, "id_rep"] = df.loc[mask, "_real_rep"]
+    df = df.drop(columns=["_real_rep"])
     logger.info("\n rep_id fix implemented")
     return df
 
@@ -108,104 +93,6 @@ def event_type_7_fix(df: pd.DataFrame) -> pd.DataFrame:
     return df.reset_index(drop=True)
 
 
-def splitting_data_for_rep_unification(
-    df,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """
-    WE NEED TO WRITE A PROPER DOCUMANTATION FOR THIS FUNCTION
-    """
-
-    third = int(df.shape[0] / 3)
-    third_2 = int(df.shape[0] / 3 * 2)
-
-    df_part1 = df.iloc[:third]
-    df_part2 = df.iloc[third:third_2]
-    df_part3 = df.iloc[third_2:]
-
-    logger.info(f"   Total rows after cleaning: {df.shape[0]:,}")
-    logger.info(
-        f"   Part sizes: {len(df_part1):,}, "
-        f"{len(df_part2):,}, "
-        f"{len(df_part3):,}"
-    )
-    return df_part1, df_part2, df_part3
-
-
-def _grouped(df):
-    """
-    helper function for actual rep unification function
-    """
-    column_to_sum_by = "event_type"
-    condition = (df[column_to_sum_by] != df[column_to_sum_by].shift()) | (
-        df["id_session"] != df["id_session"].shift()
-    )
-    return df.groupby(condition.cumsum())
-
-
-def _merge_consecutive_rows(group, columns_to_sum):
-    """
-    helper function for actual rep unification function
-    """
-    columns_to_sum = ["sentiment", "duration", "number_words"]
-    columns_to_keep_original_val = [
-        col for col in group.columns if col not in columns_to_sum
-    ]
-    if len(group) == 1:
-        return group
-    else:
-        summed_values = group[columns_to_sum].sum()
-        first_row_values = group.iloc[0][columns_to_keep_original_val]
-        new_row = {**first_row_values.to_dict(), **summed_values.to_dict()}
-        return pd.DataFrame([new_row], columns=group.columns)
-
-
-def actual_rep_unification_function(df_1, df_2, df_3):
-    grouped_1 = _grouped(df_1)
-    grouped_2 = _grouped(df_2)
-    grouped_3 = _grouped(df_3)
-
-    logger.info("   Grouping objects created.")
-
-    logger.info("\n⚙️  Merging consecutive rows...")
-    start_time = time.time()
-
-    merged_parts = []
-
-    for i, gb in enumerate([grouped_1, grouped_2, grouped_3], start=1):
-        logger.info(f"   🔹 Processing part {i}...")
-        part_start = time.time()
-
-        merged_df = gb.apply(_merge_consecutive_rows).reset_index(drop=True)
-        merged_df.to_csv(f"part{i}_after_merge.csv", index=False)
-
-        logger.info(
-            f"      Saved part{i}_after_merge.csv "
-            f"({merged_df.shape[0]:,} rows) "
-            f"in {time.time() - part_start:.2f} sec"
-        )
-
-        merged_parts.append(merged_df)
-
-    merged_df_part1, merged_df_part2, merged_df_part3 = merged_parts
-    merged_df = pd.concat(
-        [merged_df_part1, merged_df_part2, merged_df_part3]
-    ).reset_index(drop=True)
-
-    logger.info(f"\n   Total merged rows: {merged_df.shape[0]:,}")
-    logger.info(f"   Merge stage time: {time.time() - start_time:.2f} sec")
-    return merged_df
-
-
-def combine_dfs(merged_df, df_before_merge):
-    merged_df_agent = merged_df[merged_df["event_type"] == 2]
-    df_before_merge_drop_2 = df_before_merge[~(df_before_merge["event_type"] == 2)]
-
-    df_combined = (
-        pd.concat([df_before_merge_drop_2, merged_df_agent])
-        .sort_values(by=["id_rep", "end_time"])
-        .reset_index(drop=True)
-    )
-    return df_combined
 
 
 def main():
@@ -216,7 +103,7 @@ def main():
     load_start = time.time()
 
     # Reading data:
-    session_events_merged = pd.read_csv("merged_session_events.csv")
+    session_events_merged = pd.read_csv("df_raw_filtered_test_19_6.csv")
     session_events_merged = session_events_merged.rename(columns=lambda x: x.strip())
     logger.info(f"   Loaded {session_events_merged.shape[0]:,} rows")
     logger.info(f"   Time: {time.time() - load_start:.2f} sec")
@@ -228,30 +115,18 @@ def main():
     # Fixing evet type = 7 error - TODO - CHECK IF WORKS PROPERLY - CRITICAL
     session_events_merged = event_type_7_fix(session_events_merged)
 
-    session_events_merged = session_events_merged.sort_values(
-        by=["id_session", "end_time"]
-    ).reset_index(drop=True)
-    # Creating event id column:
-    session_events_merged["event_id"] = session_events_merged.index + 1
-    # session_events_merged.to_csv(f"cleaned_raw_data_{today_str}.csv", index=False)
-
-    # Begining agent unification process:
-    session_events_merged_1, session_events_merged_2, session_events_merged_3 = (
-        splitting_data_for_rep_unification(session_events_merged)
-    )
-    # Applying the unification:
-    merged_df = actual_rep_unification_function(
-        session_events_merged_1, session_events_merged_2, session_events_merged_3
-    )
-    # Combining dataframes:
-    df_combined = combine_dfs(merged_df, session_events_merged)
+    # Agent-perspective unification (replaces old session-perspective merge):
+    df_combined = unify_agent_messages(session_events_merged)
+    df_combined["event_id"] = df_combined.index + 1
 
     logger.info(f"   Final dataset rows: {df_combined.shape[0]:,}")
-    df_combined.to_csv(f"df_after_stage1_{today_str}.csv", index=False)
+    df_combined.to_csv(f"df_after_stage1_{today_str}_test.csv", index=False)
 
     logger.info("\n==============================")
     logger.info("✅ STAGE 1 COMPLETED SUCCESSFULLY")
     logger.info("==============================")
 
-    if __name__ == "__main__":
-        main()
+
+
+if __name__ == "__main__":
+    main()

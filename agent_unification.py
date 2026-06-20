@@ -73,7 +73,8 @@ def _assign_merge_groups(df: pd.DataFrame):
     )
     session_run_break = type2["_session_run"] != type2["_session_run"].shift()
 
-    merge_group = (agent_break | session_run_break).cumsum()
+    flag_break = type2["flag"] == 1
+    merge_group = (agent_break | session_run_break | flag_break).cumsum()
     return merge_group, type2.index
 
 

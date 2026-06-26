@@ -1,5 +1,13 @@
+# Data artifacts (kept out of git; copy manually)
 *.csv
 *.pdf
 *.ipynb
 *.log
-big_code_23_06_2026.txt
+
+# Stage 3 logger output (can be multi-GB)
+big_code_*.txt
+
+# Python / editor cruft
+__pycache__/
+*.pyc
+.Rhistory

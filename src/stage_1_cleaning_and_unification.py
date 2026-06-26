@@ -12,7 +12,7 @@ from agent_unification import unify_agent_messages
 
 pd.set_option("display.max_columns", None)
 pd.set_option("display.max_rows", 500)
-os.chdir(os.path.dirname(os.path.abspath(__file__)))
+os.chdir(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # repo root (script now lives in src/)
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 

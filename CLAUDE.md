@@ -17,18 +17,30 @@ See `data_documentation.md` for the full field/dictionary reference and `README.
 
 ---
 
+## Repo layout
+
+Code, docs, and the checker live in subfolders; **data CSVs stay in the repo root** (gitignored). Scripts `chdir` to the repo root at startup, so all the bare data filenames below resolve there regardless of where a script physically sits.
+
+```
+src/          stage_1/2/3 + agent_unification.py + run_pipeline.py (orchestrator)
+validation/   official_checker_18_04.py + Algorithem_Checker.txt
+docs/         data_documentation.md + reference PDFs
+notebooks/    Choiceset_error_analysis.ipynb  (left in root historically; reads data from root)
+<root>/       README.md, CLAUDE.md, *.csv data (raw / interim / output)
+```
+
 ## Pipeline Overview (3 stages + checker)
 
-Raw input: `merged_session_events.csv` (event-level, ~6M rows) and `merged_session.csv` (session-level time windows).
+Raw input: `raw_events_17_06.csv` (event-level, clean column names + `silent_abandonment_bool`) and `merged_session.csv` (session-level time windows). `merged_session_events.csv` is the older raw input, superseded.
 
-> **Inter-stage handoff is MANUAL.** Each script writes a dated/named CSV; you rename it by hand to match the next stage's expected input filename. The filenames below do **not** auto-chain — see Known Open Issues.
+> **`src/run_pipeline.py` auto-chains all three stages** (Stage 1 → 2 → 3) as subprocesses, streaming output to console + a timestamped log. Run from the repo root: `python src/run_pipeline.py` (or `--start-stage 3` to reuse existing Stage 1/2 outputs). Intermediate CSVs are written with the names the next stage expects, so no manual renaming.
 
-| Stage | Script | Reads | Writes |
+| Stage | Script (`src/`) | Reads | Writes |
 |---|---|---|---|
-| 1 | `stage_1_cleaning_and_unification.py` | `merged_session_events.csv` | `df_after_stage1_<date>.csv` |
-| 2 | `Stage 2 - Creating concurrencies & exploded table.py` | `aggregated_df_11_5.csv` (precomputed) | `df_exploded_all_data.csv`, `before_third_stage_all_data.csv` |
+| 1 | `stage_1_cleaning_and_unification.py` | `raw_events_17_06.csv` | `df_after_stage1_<date>.csv` (orchestrator: `df_1_not_merged_2_merged.csv`) |
+| 2 | `stage_2_concurrencies_and_explode.py` | `df_1_not_merged_2_merged.csv`, `merged_session.csv` | `df_exploded_all_data.csv`, `before_third_stage_all_data.csv` |
 | 3 | `stage_3_creating_choicesets_from_exploded.py` | `df_1_not_merged_2_merged.csv`, `df_exploded_all_data.csv` | `df_choicesets_<date>.csv` |
-| ✓ | `official_checker_18_04.py` | `df_choicesets_<date>.csv`, `merged_session_events.csv` | validation report (stdout) |
+| ✓ | `validation/official_checker_18_04.py` | `df_choicesets_<date>.csv`, `merged_session_events.csv` | validation report (stdout) |
 
 ---
 
@@ -88,14 +100,14 @@ Binary column added to every row (0 for non-type-2). For type-2 rows:
 
 ## Stage 2 — Concurrencies & exploded table
 
-`Stage 2 - Creating concurrencies & exploded table.py`.
+`stage_2_concurrencies_and_explode.py`.
 
-- **The concurrency-extraction code is fully commented out.** The script currently resumes from a precomputed `aggregated_df_11_5.csv`. The commented logic: for each agent reply (type=2), find all sessions of the same `id_rep` where `chat_start_time < reply_end_time < chat_end_time` → `concurrent_sessions`.
-- `workload = len(concurrent_sessions) / 11`.
-- `literal_eval` parses the stringified list columns.
+- **Concurrency now computed from scratch** (the old precomputed `aggregated_df_11_5.csv` path is kept only as a commented reference block). For each agent reply (type=2), find all sessions of the same `id_rep` where `chat_start_time < reply_end_time < chat_end_time` → `concurrent_sessions`. Implemented with per-agent pre-grouped numpy arrays for speed (~14 sec on full data); verified identical to the original brute-force filter (0 mismatches on 300 samples).
+- `workload = len(concurrent_sessions)` (raw concurrent-session count). **The earlier `/ 11` divisor was a mistake and has been removed.**
+- Concurrency lists are kept as real Python lists in memory, so **no `literal_eval`** is needed before the explode.
 - Keep only rows with **>1 concurrent session** (genuine choices).
 - **Explode** `concurrent_sessions` → one row per alternative. `chosen = 1` where `concurrent_sessions == session_id_chosen`.
-- **`flag` carried through:** `get_data_for_an_identifier` carries the chosen agent reply's `flag` onto the choice set, so it survives the explode (replicated across all alternatives — it's a choice-set-level attribute of the agent's decision).
+- **`flag` carried through:** the chosen agent reply's `flag` is carried onto the choice set so it survives the explode (replicated across all alternatives — it's a choice-set-level attribute of the agent's decision).
 
 ---
 
@@ -111,8 +123,9 @@ Binary column added to every row (0 for non-type-2). For type-2 rows:
   - `n_messages` = count of messages in the turn
   - DROP: `read_date, read_time, accept_date, accept_time, delay` (`COLS_TO_DROP`)
   - FIRST-row value for everything else
-- `waiting_time = row.time − end_time of the FIRST pending message`.
-- Carries `choice_set` (= exploded row index), `chosen`, `workload`, `flag`.
+- `waiting_time = choice_time − end_time of the FIRST pending message` (`choice_time` = `row.time` normally; see Option 3 for the flag=1 exception).
+- `chosen_time` = `choice_time` (i.e. `first pending end_time + waiting_time`) — emitted as a column for the checker / sanity reconstruction.
+- Carries `choice_set` (= exploded row index), `chosen`, `chosen_time`, `workload`, `flag`.
 
 ### Option 3 — flag=1 re-engagement injection
 
@@ -149,7 +162,7 @@ Both filter raw events to `event_type in [1, 2]` (validate) / `[1, 2, 7]` (check
 | Pending turn | Consecutive type=1 messages since the session's last type=2 |
 | `n_messages` | Count of messages in the pending turn |
 | `waiting_time` | choice_time − end_time of the **first** pending message |
-| `workload` | concurrent sessions / 11 |
+| `workload` | concurrent session count (raw `len(concurrent_sessions)`) |
 | `chosen` | 1 for the replied-to session, 0 otherwise |
 
 **event_type:** 1=visitor msg, 2=agent reply, 7=leaves queue (agent first sees session), 8/9=parallel-chat overhead (dropped).
@@ -161,8 +174,8 @@ Both filter raw events to `event_type in [1, 2]` (validate) / `[1, 2, 7]` (check
 
 1. **Abandonment filter — DECIDED.** Stage 1 drops `outcome == 4` (known abandonment) and this is the settled approach — known abandonment is excluded from the choice model. (Background: investigation showed both silent (3) and known (4) abandonment sessions can contain full agent–visitor interactions; the notebook explored dropping only known_abandonment sessions with an agent reply, but the decision is to drop all `outcome == 4`.)
 2. **`stage_1.py` `__name__` bug — FIXED.** The `if __name__` block was indented inside `main()`. De-indented to module level.
-3. **Filename drift / manual chain** — Stage 1 writes `df_after_stage1_<date>.csv` but Stage 3 reads `df_1_not_merged_2_merged.csv`; README cites a stale `..._v2.py` name. Handoff is currently manual renaming.
-4. **Stage 2 concurrency code commented out** — relies on precomputed `aggregated_df_11_5.csv`; not runnable end-to-end from raw as-is. **`aggregated_df_11_5.csv` is now STALE** — the agent-perspective unification changed which/how many type-2 events exist, so the full pipeline must be re-run from the new Stage 1 output (uncomment Stage 2's concurrency block, which now also carries `flag`).
+3. **Filename drift / manual chain — RESOLVED.** `src/run_pipeline.py` now auto-chains the stages, passing each stage's output as the next stage's input (`df_1_not_merged_2_merged.csv` etc.), so no manual renaming. (Stage 1's standalone default output name still differs; only matters if a stage is run by hand outside the orchestrator.)
+4. **Stage 2 concurrency code — RE-ACTIVATED.** Concurrency is now computed from scratch in `stage_2_concurrencies_and_explode.py` (numpy-optimized, verified against the original). The old precomputed `aggregated_df_11_5.csv` is no longer used (it was stale anyway). Carries `flag`.
 5. **Checker reference-data mismatch** — checker reads raw `merged_session_events.csv`, but choice sets are built from Stage 1 *output* (which has type=7 fix, updated end_times, merged type-2, propagated id_rep). This causes false mismatches when a session was transformed in Stage 1.
 6. **Check-3 failures (Stage 2 coverage)** — some sessions with an unanswered visitor message at the choice moment are excluded from the choice set because their session-level `chat_end_time` precedes the choice moment. Open modeling question: should a session that is "closed" in metadata but has an open visitor turn count as a competing alternative?
 
@@ -170,7 +183,7 @@ Both filter raw events to `event_type in [1, 2]` (validate) / `[1, 2, 7]` (check
 
 ## Repo / Git Notes
 
-- `.gitignore`: `*.csv`, `*.pdf`, `*.ipynb` — data files and notebooks are **not** tracked. Pulling/cloning will not bring CSVs; copy data manually.
-- `Choiceset_error_analysis.ipynb` was un-tracked via `git rm --cached` and is now ignored on `main`.
+- `.gitignore`: `*.csv`, `*.pdf`, `*.ipynb`, `*.log`, `big_code_*.txt`, `__pycache__/`, `*.pyc`, `.Rhistory` — data files, notebooks, logs, and cruft are **not** tracked. Pulling/cloning will not bring CSVs; copy data manually.
+- `Choiceset_error_analysis.ipynb` was un-tracked via `git rm --cached` and is ignored on `main`. It lives in the **repo root** (not `notebooks/`) because it reads ~14 data CSVs by bare filename from the root.
 - Remote: `origin` → `https://github.com/TamirS94/Service-system-research.git`.
-- Reference docs in repo: `README.md`, `data_documentation.md`, `Algorithem_Checker.txt`, `claude_30_5.md` (earlier session log).
+- Reference docs: `README.md` + `CLAUDE.md` (root), `docs/data_documentation.md`, `validation/Algorithem_Checker.txt`.

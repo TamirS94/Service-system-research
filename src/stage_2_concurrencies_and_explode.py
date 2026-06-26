@@ -22,7 +22,7 @@ print("==============================")
 print("\n⚙️  Setting environment...")
 pd.set_option("display.max_columns", None)
 pd.set_option("display.max_rows", 500)
-os.chdir(os.path.dirname(os.path.abspath(__file__)))
+os.chdir(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # repo root (script now lives in src/)
 print(f"   Working directory: {os.getcwd()}")
 
 # # ------------------------------

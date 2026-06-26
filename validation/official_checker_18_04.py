@@ -3,7 +3,7 @@ import os
 
 pd.set_option("display.max_columns", None)
 pd.set_option("display.max_rows", 500)
-os.chdir(os.path.dirname(os.path.abspath(__file__)))
+os.chdir(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # repo root (script now lives in validation/)
 
 
 def validate_n_messages(df_reg: pd.DataFrame, df_raw: pd.DataFrame) -> dict:

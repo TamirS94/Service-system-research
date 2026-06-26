@@ -5,9 +5,10 @@ Each stage runs as its own subprocess (isolated memory; intermediate CSVs are
 preserved on disk so a later stage can be resumed without rerunning earlier ones).
 Output is teed to a timestamped log file so an overnight run can be reviewed later.
 
-Usage:
-    python run_pipeline.py                         # full run on merged_session_events.csv
-    python run_pipeline.py --input <raw.csv> \
+Run from the repo root (paths default to the root, where the data CSVs live):
+    python src/run_pipeline.py                     # full run on raw_events_17_06.csv
+    python src/run_pipeline.py --start-stage 3     # resume (reuse existing Stage 1/2 outputs)
+    python src/run_pipeline.py --input <raw.csv> \
         --stage1-out <s1.csv> --exploded-out <exp.csv>   # custom (e.g. smoke test)
 """
 
@@ -19,8 +20,9 @@ import time
 from datetime import datetime
 
 PYTHON = sys.executable
-HERE = os.path.dirname(os.path.abspath(__file__))
-os.chdir(HERE)
+SRC_DIR = os.path.dirname(os.path.abspath(__file__))   # this script lives in src/
+REPO_ROOT = os.path.dirname(SRC_DIR)                    # data CSVs live in the repo root
+os.chdir(REPO_ROOT)                                     # run stages with root as cwd so they find the data
 
 # Windows consoles default to a legacy codepage (e.g. cp1255) that can't encode the
 # emoji the stages print. Force UTF-8 with replacement so logging never crashes.
@@ -32,9 +34,9 @@ except Exception:
 # PYTHONUNBUFFERED so child prints appear immediately (not block-buffered through the pipe).
 _CHILD_ENV = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUNBUFFERED="1")
 
-STAGE1 = "stage_1_cleaning_and_unification.py"
-STAGE2 = "Stage 2 - Creating concurrencies & exploded table.py"
-STAGE3 = "stage_3_creating_choicesets_from_exploded.py"
+STAGE1 = os.path.join(SRC_DIR, "stage_1_cleaning_and_unification.py")
+STAGE2 = os.path.join(SRC_DIR, "stage_2_concurrencies_and_explode.py")
+STAGE3 = os.path.join(SRC_DIR, "stage_3_creating_choicesets_from_exploded.py")
 
 
 def run_stage(label, args, log):

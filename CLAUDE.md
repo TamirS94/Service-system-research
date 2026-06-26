@@ -25,7 +25,7 @@ Raw input: `merged_session_events.csv` (event-level, ~6M rows) and `merged_sessi
 
 | Stage | Script | Reads | Writes |
 |---|---|---|---|
-| 1 | `stage_1.py` | `merged_session_events.csv` | `df_after_stage1_<date>.csv` |
+| 1 | `stage_1_cleaning_and_unification.py` | `merged_session_events.csv` | `df_after_stage1_<date>.csv` |
 | 2 | `Stage 2 - Creating concurrencies & exploded table.py` | `aggregated_df_11_5.csv` (precomputed) | `df_exploded_all_data.csv`, `before_third_stage_all_data.csv` |
 | 3 | `stage_3_creating_choicesets_from_exploded.py` | `df_1_not_merged_2_merged.csv`, `df_exploded_all_data.csv` | `df_choicesets_<date>.csv` |
 | ✓ | `official_checker_18_04.py` | `df_choicesets_<date>.csv`, `merged_session_events.csv` | validation report (stdout) |
@@ -95,6 +95,7 @@ Binary column added to every row (0 for non-type-2). For type-2 rows:
 - `literal_eval` parses the stringified list columns.
 - Keep only rows with **>1 concurrent session** (genuine choices).
 - **Explode** `concurrent_sessions` → one row per alternative. `chosen = 1` where `concurrent_sessions == session_id_chosen`.
+- **`flag` carried through:** `get_data_for_an_identifier` carries the chosen agent reply's `flag` onto the choice set, so it survives the explode (replicated across all alternatives — it's a choice-set-level attribute of the agent's decision).
 
 ---
 
@@ -111,7 +112,20 @@ Binary column added to every row (0 for non-type-2). For type-2 rows:
   - DROP: `read_date, read_time, accept_date, accept_time, delay` (`COLS_TO_DROP`)
   - FIRST-row value for everything else
 - `waiting_time = row.time − end_time of the FIRST pending message`.
-- Carries `choice_set` (= exploded row index), `chosen`, `workload`.
+- Carries `choice_set` (= exploded row index), `chosen`, `workload`, `flag`.
+
+### Option 3 — flag=1 re-engagement injection
+
+A `flag=1` event is a choice moment whose **chosen** session has no pending visitor turn (the agent replied again to a session whose visitor said nothing new — see Agent-message unification). Left alone, Stage 3 would skip the chosen alternative and produce a **no-chosen choice set**. Instead, for the chosen alternative of a `flag=1` set (`row.flag == 1 and row.chosen == 1`), we **reconstruct the visitor turn from the session's genuine reply** and inject it as the `chosen=1` row:
+
+- `last_type1_time` = end_time of the most recent type-1 in the session before `row.time`.
+- `genuine_reply_time` = first type-2 **after** `last_type1_time` (the agent's first reply to that turn).
+- turn = type-1 messages between the type-2 before the turn and `last_type1_time`.
+- `n_messages` + summed covariates come from that turn (identical to what the session produced at its genuine reply).
+- **`waiting_time = genuine_reply_time − first pending message`** — response latency of the turn, NOT measured to the re-engagement moment. (Decision: the customer's wait ends at the first reply; later re-engagement messages don't extend it. Cost: within a flag=1 set the chosen row's waiting_time reference differs from the non-chosen alternatives, which use `row.time`. The `flag` column keeps these rows isolable in the regression.)
+- `workload` still comes from the current choice moment (`row.workload`) — it's a property of this choice set.
+- Chained flag=1 events auto-resolve: all point at the same most-recent visitor turn, so no cross-choice-set caching is needed.
+- Edge case: a chosen session with no type-1 at all before `row.time` cannot be reconstructed → stays no-chosen (rare).
 
 ---
 
@@ -148,7 +162,7 @@ Both filter raw events to `event_type in [1, 2]` (validate) / `[1, 2, 7]` (check
 1. **Abandonment filter — DECIDED.** Stage 1 drops `outcome == 4` (known abandonment) and this is the settled approach — known abandonment is excluded from the choice model. (Background: investigation showed both silent (3) and known (4) abandonment sessions can contain full agent–visitor interactions; the notebook explored dropping only known_abandonment sessions with an agent reply, but the decision is to drop all `outcome == 4`.)
 2. **`stage_1.py` `__name__` bug — FIXED.** The `if __name__` block was indented inside `main()`. De-indented to module level.
 3. **Filename drift / manual chain** — Stage 1 writes `df_after_stage1_<date>.csv` but Stage 3 reads `df_1_not_merged_2_merged.csv`; README cites a stale `..._v2.py` name. Handoff is currently manual renaming.
-4. **Stage 2 concurrency code commented out** — relies on precomputed `aggregated_df_11_5.csv`; not runnable end-to-end from raw as-is.
+4. **Stage 2 concurrency code commented out** — relies on precomputed `aggregated_df_11_5.csv`; not runnable end-to-end from raw as-is. **`aggregated_df_11_5.csv` is now STALE** — the agent-perspective unification changed which/how many type-2 events exist, so the full pipeline must be re-run from the new Stage 1 output (uncomment Stage 2's concurrency block, which now also carries `flag`).
 5. **Checker reference-data mismatch** — checker reads raw `merged_session_events.csv`, but choice sets are built from Stage 1 *output* (which has type=7 fix, updated end_times, merged type-2, propagated id_rep). This causes false mismatches when a session was transformed in Stage 1.
 6. **Check-3 failures (Stage 2 coverage)** — some sessions with an unanswered visitor message at the choice moment are excluded from the choice set because their session-level `chat_end_time` precedes the choice moment. Open modeling question: should a session that is "closed" in metadata but has an open visitor turn count as a competing alternative?
 

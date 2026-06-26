@@ -95,15 +95,17 @@ def event_type_7_fix(df: pd.DataFrame) -> pd.DataFrame:
 
 
 
-def main():
+def main(input_path="raw_events_17_06.csv", output_path=None):
     # Assigining a dynamic str variable for today:
     today_str = date.today().strftime("%Y-%m-%d")
+    if output_path is None:
+        output_path = f"df_after_stage1_{today_str}.csv"
 
     logger.info("\n Loading raw dataset and fixing column names")
     load_start = time.time()
 
     # Reading data:
-    session_events_merged = pd.read_csv("df_raw_filtered_test_19_6.csv")
+    session_events_merged = pd.read_csv(input_path)
     session_events_merged = session_events_merged.rename(columns=lambda x: x.strip())
     logger.info(f"   Loaded {session_events_merged.shape[0]:,} rows")
     logger.info(f"   Time: {time.time() - load_start:.2f} sec")
@@ -120,13 +122,18 @@ def main():
     df_combined["event_id"] = df_combined.index + 1
 
     logger.info(f"   Final dataset rows: {df_combined.shape[0]:,}")
-    df_combined.to_csv(f"df_after_stage1_{today_str}_test.csv", index=False)
+    df_combined.to_csv(output_path, index=False)
 
     logger.info("\n==============================")
     logger.info("✅ STAGE 1 COMPLETED SUCCESSFULLY")
+    logger.info(f"   Wrote: {output_path}")
     logger.info("==============================")
-
+    return output_path
 
 
 if __name__ == "__main__":
-    main()
+    import sys
+
+    in_path = sys.argv[1] if len(sys.argv) > 1 else "raw_events_17_06.csv"
+    out_path = sys.argv[2] if len(sys.argv) > 2 else None
+    main(in_path, out_path)

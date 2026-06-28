@@ -76,7 +76,14 @@ def main(merged_df: pd.DataFrame, df_exploded: pd.DataFrame, today_str: str):
             logger.info("--------------------------------------")
             continue
 
-        # Collect all consecutive type=1 messages since the last agent reply
+        # Collect all consecutive type=1 messages since the last agent reply.
+        # Pending = type=1 with end_time >= last reply (NOT strict >): end_time is whole-second,
+        # so a visitor message can share the exact second of the agent's last reply. Stage 1's
+        # canonical sort (id_session, end_time asc, event_type desc) places such a type=1 AFTER
+        # the type=2 at that second, i.e. treats it as pending. A strict > drops it and yields a
+        # spurious empty turn (this is what made choice_set 3996 a no-chosen set). NOTE: the
+        # agent-first tie-break is itself chronologically backwards ~60% of the time — a known
+        # limitation (CLAUDE.md Known Issues #7, "Problem 2"), deferred.
         past_type2 = past_events[past_events["event_type"] == 2]
 
         if past_type2.empty:
@@ -85,7 +92,7 @@ def main(merged_df: pd.DataFrame, df_exploded: pd.DataFrame, today_str: str):
             last_agent_reply_time = past_type2["end_time"].max()
             consecutive_type1 = past_events[
                 (past_events["event_type"] == 1) &
-                (past_events["end_time"] > last_agent_reply_time)
+                (past_events["end_time"] >= last_agent_reply_time)
             ]
 
         # choice_time is the reference used for waiting_time; normally the choice moment.
@@ -110,9 +117,12 @@ def main(merged_df: pd.DataFrame, df_exploded: pd.DataFrame, today_str: str):
                     continue
                 genuine_reply_time = type2_after["end_time"].min()
                 turn_lower_bound = type2_before["end_time"].max() if not type2_before.empty else float("-inf")
+                # >= turn_lower_bound (same same-second tie reasoning as the main path):
+                # the first message of the reconstructed turn may share the second of the
+                # preceding reply and must still be included.
                 consecutive_type1 = past_events[
                     (past_events["event_type"] == 1) &
-                    (past_events["end_time"] > turn_lower_bound) &
+                    (past_events["end_time"] >= turn_lower_bound) &
                     (past_events["end_time"] <= last_type1_time)
                 ]
                 # waiting_time uses the genuine reply (response latency of the turn), per option 3.

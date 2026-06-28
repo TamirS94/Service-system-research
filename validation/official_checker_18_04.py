@@ -60,10 +60,14 @@ def validate_n_messages(df_reg: pd.DataFrame, df_raw: pd.DataFrame) -> dict:
                 all_rows_valid = False
                 continue
 
-            # Mirror Stage 3 v2 logic: find last type=2 before chosen_time, then
-            # count type=1 events after it. This avoids dependence on row.end_time,
-            # which was updated to the type=7 timestamp in Stage 1 and no longer
-            # matches the original type=1 end_time in the raw data.
+            # Mirror Stage 3's pending-turn logic: find the last type=2 before chosen_time,
+            # then count type=1 events from that reply onward. The lower bound is `>=`
+            # (not strict >): end_time is whole-second, so a visitor message can share the
+            # exact second of the last agent reply; Stage 1's canonical sort treats such a
+            # type=1 as pending, and Stage 3 counts it, so the checker must too. The
+            # event_type==2 count below keeps a strict > so the previous reply at
+            # last_type2_time is not double-counted. (Avoids dependence on row.end_time,
+            # which Stage 1 may have rewritten to a type=7 timestamp.)
             past_type2 = session_raw[
                 (session_raw["event_type"] == 2) &
                 (session_raw["end_time"] < row.chosen_time)
@@ -72,7 +76,7 @@ def validate_n_messages(df_reg: pd.DataFrame, df_raw: pd.DataFrame) -> dict:
 
             raw_message_count = session_raw[
                 (session_raw["event_type"] == 1) &
-                (session_raw["end_time"] > last_type2_time) &
+                (session_raw["end_time"] >= last_type2_time) &
                 (session_raw["end_time"] < row.chosen_time)
             ].shape[0]
 

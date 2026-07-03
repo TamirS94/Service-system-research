@@ -32,7 +32,7 @@ def clean_data(df: pd.DataFrame) -> pd.DataFrame:
     before = df.shape[0]
     df = df[df["outcome"] != 4].reset_index(drop=True)
     after = df.shape[0]
-    logger.info(f"   Removed silent abandonment: {before - after:,} rows")
+    logger.info(f"   Removed known abandonment: {before - after:,} rows")
 
     # Drop event types 8 and 9
     before = df.shape[0]

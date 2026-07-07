@@ -260,7 +260,7 @@ def main(
     gc.collect()
 
     # 3. Workload
-    print("\n📈 Creating workload feature (len(concurrent_sessions) / 11)...")
+    print("\n📈 Creating workload feature (len(concurrent_sessions))...")
     aggregated_df["workload"] = aggregated_df["concurrent_sessions"].apply(len)
 
     # 4. Keep genuine choices (>1 concurrent session)

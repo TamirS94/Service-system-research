@@ -126,7 +126,7 @@ The dataset is created through a three-stage ELT process implemented entirely in
 **Output:** `df_exploded_all_data.csv`
 
 - Loads Stage 1 output and session-level `merged_session.csv`
-- For each agent reply (event_type=2), computes from scratch all sessions **active at that moment** for the same agent: `chat_start_time < choice_time < chat_end_time` → `concurrent_sessions`
+- For each agent reply (event_type=2), computes from scratch all sessions **active at that moment** for the same agent: `chat_start_time < choice_time <= chat_end_time` → `concurrent_sessions`. The upper bound is `<=` (not strict): `chat_end_time` is a whole-second stamp, so a reply can land on the exact second a session's metadata marks it closed while its visitor turn is still open — that session is a genuine competing alternative and must be included. The lower bound stays strict (`<`): a session starting at the exact reply second is a proactive opener with no pending customer turn. (See CLAUDE.md Known Issue #6 for the full investigation of both bounds.)
 - Computes `workload = len(concurrent_sessions)` (raw concurrent-session count)
 - Retains only choice sets with more than one concurrent session (genuine choices)
 - Explodes so each row = one alternative in a choice set; `chosen = 1` if the concurrent session equals the session actually replied to

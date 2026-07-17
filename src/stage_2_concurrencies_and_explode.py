@@ -32,13 +32,21 @@ print(f"   Working directory: {os.getcwd()}")
 def _build_sessions_by_rep(merged_sessions: pd.DataFrame) -> dict:
     """Pre-group session time-windows per agent for fast concurrency lookup.
 
-    Returns {id_rep: (start_times, end_times, session_ids)} as numpy arrays so
-    each agent-message query is a vectorized mask over only that agent's sessions
-    (avoids scanning the whole sessions table per message)."""
+    Returns {id_rep: (assignment_times, end_times, session_ids)} as numpy arrays
+    so each agent-message query is a vectorized mask over only that agent's
+    sessions (avoids scanning the whole sessions table per message).
+
+    Lower bound is `queue_exit_time` (assignment / the moment the agent is given
+    the session and can first review it) — NOT `chat_start_time` (when the
+    customer *sent* their first message). The pre-assignment queue wait is
+    irrelevant to this agent's choices: the session was not yet on their plate.
+    (`chat_start_time` is empirically the first message's start_time; assignment
+    = `chat_start_time + queue_time = queue_exit_time`.) This mirrors Stage 1's
+    type=7 fix, which already pins waiting_time to the agent-visible moment."""
     by_rep = {}
     for rep, g in merged_sessions.groupby("id_rep"):
         by_rep[rep] = (
-            np.asarray(g["chat_start_time"], dtype=float),
+            np.asarray(g["queue_exit_time"], dtype=float),
             np.asarray(g["chat_end_time"], dtype=float),
             g["id_session"].to_numpy(),
         )
@@ -58,6 +66,17 @@ def main(
     merged_df.columns = merged_df.columns.str.strip()
     merged_sessions = pd.read_csv(sessions_path).rename(columns=lambda x: x.strip())
     print(f"   merged_df: {merged_df.shape[0]:,} rows | sessions: {merged_sessions.shape[0]:,} rows")
+
+    # Drop known-abandonment sessions (outcome == 4) from the concurrency pool, to
+    # match Stage 1 (which drops outcome==4 from the events). These customers gave up
+    # while still in the queue — never assigned an agent — so they were never a
+    # competing alternative and must not inflate workload. This is also a bijection
+    # with queue_exit_time == 0 (no assignment ever happened), so dropping them makes
+    # queue_exit_time universally valid and needs no sentinel fallback.
+    if "outcome" in merged_sessions.columns:
+        before_o4 = len(merged_sessions)
+        merged_sessions = merged_sessions[merged_sessions["outcome"] != 4]
+        print(f"   Dropped {before_o4 - len(merged_sessions):,} outcome==4 (known-abandonment) sessions")
     print(f"   Load time: {time.time() - load_start:.2f} sec")
 
     has_flag = "flag" in merged_df.columns
@@ -77,16 +96,17 @@ def main(
     for i, row in enumerate(agent_msgs.itertuples(index=False)):
         if i % 50000 == 0:
             print(f"\r   Processing agent message {i:,}/{len(agent_msgs):,}", end="")
-        starts, ends, sids = sessions_by_rep.get(row.id_rep, empty)
-        # Concurrent = session started before the reply and had not yet ended.
-        # Upper bound is >= (not strict >): chat_end_time is whole-second, so a reply can
-        # land on the exact second the session's metadata marks it closed. Such a session
-        # still had an open visitor turn the agent was answering, so it must count as a
-        # competing alternative (recovers ~53 otherwise-dropped chosen sessions — the
-        # "closed-but-active" case, CLAUDE.md Known Issue #6). Lower bound stays strict:
-        # a session starting at the exact reply second is a proactive opener with no
-        # pending customer turn, so it is correctly excluded.
-        mask = (starts < row.end_time) & (ends >= row.end_time)
+        assign, ends, sids = sessions_by_rep.get(row.id_rep, empty)
+        # Concurrent = session was ASSIGNED to the agent before the reply and had not
+        # yet ended: `queue_exit_time < reply <= chat_end_time` (CLAUDE.md Known Issue #6).
+        #   Lower bound = assignment (queue_exit_time), strict `<`: the pre-assignment
+        #     queue wait is not this agent's concern, and a session assigned at the exact
+        #     reply second has no pending turn yet (proactive-opener boundary). Verified to
+        #     create 0 new no-chosen sets (an agent is never assigned after replying).
+        #   Upper bound = chat_end_time, `>=` (not strict): chat_end is whole-second, so a
+        #     reply can land on the exact close second while the visitor turn is still open
+        #     — a genuine "closed-but-active" alternative (recovers ~53 chosen sessions).
+        mask = (assign < row.end_time) & (ends >= row.end_time)
         records.append(
             {
                 "id_rep": row.id_rep,

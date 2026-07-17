@@ -4,9 +4,18 @@
 import logging
 import pandas as pd
 import os
+import sys
 import gc
 import numpy as np
 import time
+
+# Make stdout/stderr UTF-8 so emoji in prints/logs don't crash on legacy Windows
+# consoles (cp1255). Harmless elsewhere; the orchestrator also sets PYTHONIOENCODING.
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
 print("\n==============================")
 print("🚀 STARTING STAGE 2 PROCESS")

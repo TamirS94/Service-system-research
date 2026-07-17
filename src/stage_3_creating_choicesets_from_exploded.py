@@ -1,8 +1,17 @@
 import pandas as pd
+import sys
 import time
 import warnings
 from datetime import datetime
 import logging
+
+# Make stdout/stderr UTF-8 so emoji in prints/logs don't crash on legacy Windows
+# consoles (cp1255). Harmless elsewhere; the orchestrator also sets PYTHONIOENCODING.
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
 logger = logging.getLogger(__name__)
 warnings.filterwarnings("ignore")

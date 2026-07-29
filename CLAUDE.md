@@ -40,7 +40,7 @@ Raw input: `raw_events_17_06.csv` (event-level, clean column names + `silent_aba
 | 1 | `stage_1_cleaning_and_unification.py` | `raw_events_17_06.csv` | `df_after_stage1_<date>.csv` (orchestrator: `df_1_not_merged_2_merged.csv`) |
 | 2 | `stage_2_concurrencies_and_explode.py` | `df_1_not_merged_2_merged.csv`, `merged_session.csv` | `df_exploded_all_data.csv`, `before_third_stage_all_data.csv` |
 | 3 | `stage_3_creating_choicesets_from_exploded.py` | `df_1_not_merged_2_merged.csv`, `df_exploded_all_data.csv` | `df_choicesets_<date>.csv` |
-| ✓ | `validation/official_checker_18_04.py` | `df_choicesets_<date>.csv`, `merged_session_events.csv` | validation report (stdout) |
+| ✓ | `validation/official_checker_18_04.py` | `df_choicesets_<date>.csv` (newest by default), `df_1_not_merged_2_merged.csv`, `df_exploded_all_data.csv` | validation report (stdout) |
 
 ---
 
@@ -146,12 +146,33 @@ A `flag=1` event is a choice moment whose **chosen** session has no pending visi
 
 ## Checker — `official_checker_18_04.py`
 
-Two validations, both at choice-set level:
+Rewritten to match the current pipeline. Run from the repo root:
 
-- **`validate_n_messages`** — mirrors Stage 3 v2 logic: find last type=2 before `chosen_time`, count type=1 after it; verify it equals `n_messages`, and that there is exactly one (chosen) / zero (non-chosen) type=2 at the choice moment.
-- **`checker`** (colleague's) — 3 checks: (1) chosen session matches the session with a reply at exactly `chosen_time`; (2) no events after `chosen_time` in window; (3) set of choice-set sessions == set of raw sessions whose last event before `chosen_time` is type 1 or 7.
+```
+python validation/official_checker_18_04.py                 # structural + Stage 2 cross-check + segmented sample
+python validation/official_checker_18_04.py --sample 300     # + 300 random sets
+python validation/official_checker_18_04.py --choice-sets 3996,756
+python validation/official_checker_18_04.py --structural-only
+```
 
-Both filter raw events to `event_type in [1, 2]` (validate) / `[1, 2, 7]` (checker). Segmented sampling via `choose_choicets` / `segment_choice` (high/low waiting_time, n_messages, workload).
+**Reference data (the key change).** The checker now reads the **Stage 1 output** (`df_1_not_merged_2_merged.csv`) as the event stream, not a pre-pipeline raw file — that is what Stage 3 was actually built from, so the false mismatches of Known Issue #5 are gone. It also reads the **Stage 2 exploded table** (`df_exploded_all_data.csv`) for the **choice moment `T`** and the concurrency lists. `T` cannot be recovered from the choice-set table alone: on a `flag=1` set, Option 3 writes the *genuine reply time* into the chosen row's `chosen_time`, and ~65% of those sets contain nothing but that row. Without the exploded table the checker falls back to `max(chosen_time)` and warns. Choice-set input defaults to the **newest** `df_choicesets_*.csv`.
+
+Four validators:
+
+- **`structural_report`** — whole file, vectorized, no event lookups: one-chosen-per-set, no duplicate alternatives, `waiting_time == chosen_time − end_time`, sign/range sanity, per-set constancy of `workload`/`flag`/`chosen_time`(flag=0), `set size <= workload`.
+- **`exploded_report`** — whole file, against Stage 2: every emitted alternative was in the agent's concurrency list, `workload == len(concurrent_sessions)`, `chosen_time == T` (strictly earlier on an Option-3 chosen row).
+- **`validate_n_messages`** — sampled sets, event level: rebuilds each alternative's pending turn with Stage 3's exact rules (the `>=` same-second tie rule *and* the Option-3 reconstruction) and verifies `n_messages`, first-pending `end_time`, `waiting_time`, `chosen_time`, the summed covariates (`COLS_TO_SUM`), and that the turn was genuinely unanswered.
+- **`checker`** — sampled sets, set level: exactly one chosen; the chosen session is the only alternative with a reply at `T`; emitted alternatives match the concurrency list, with every dropped alternative justified by Stage 3's "no pending visitor turn" skip rule.
+
+**Report format.** The whole-file passes mark `[OK]`/`[FAIL]` for invariants and `[INFO]` for expected categories (`no_chosen_set`, `singleton_set`, `id_rep_*`). The sampled passes print **one block per choice set listing every check as `[TRUE ]` / `[FALSE]` / `[ n-a ]`**, with both validators merged so a single block answers "which checks did this choice set pass?" — `n-a` means the check does not apply (Option-3 reconstruction on a normal set, or the Stage 2 coverage checks with `--no-exploded`). Each segment ends with a TRUE/FALSE/n-a tally per check, and the run ends with a failure summary and a verdict line. `--compact` collapses each set to one line plus its FALSE list.
+
+Segmented sampling via `choose_choicets` / `segment_choice`, now seeded (`--seed`) and safe when a segment has fewer sets than requested. Nine segments — high/low `waiting_time`/`n_messages`/`workload`, plus `high_events`, `flag_reengagement`, `no_chosen` — at `--n-per-segment` each (default 5, so ~45 sets); `--sample N` adds N uniformly random sets on top.
+
+**Colleague's original 3 checks** — (1) chosen session == session replying at `chosen_time` is *kept* as `chosen_is_replier` (now resolved against the true `T`); (2) "no events after `chosen_time`" was **dropped as vacuous** (the window was already filtered to `<= chosen_time`, so it could never fail); (3) "set of choice-set sessions == raw sessions whose last event is type 1/7" was **replaced** — Stage 2 defines concurrency from the *session metadata* window (`queue_exit_time < T <= chat_end_time`), not from the event stream, so the event-stream reconstruction disagreed with the pipeline by construction. The concurrency list itself is now the reference.
+
+**Validated against injected defects** (n_messages, waiting_time, aggregation sums, chosen flips, alien sessions, workload, first-message end_time, chosen_time, deleted chosen row) — all ten classes are caught.
+
+**Current status on `df_choicesets_17_07_2026.csv`:** all whole-file invariants hold (1,872,830 sets); 322/322 sampled sets pass `validate_n_messages`; the only `checker` failures are the deliberately sampled `no_chosen` sets.
 
 ---
 
@@ -178,7 +199,7 @@ Both filter raw events to `event_type in [1, 2]` (validate) / `[1, 2, 7]` (check
 2. **`stage_1.py` `__name__` bug — FIXED.** The `if __name__` block was indented inside `main()`. De-indented to module level.
 3. **Filename drift / manual chain — RESOLVED.** `src/run_pipeline.py` now auto-chains the stages, passing each stage's output as the next stage's input (`df_1_not_merged_2_merged.csv` etc.), so no manual renaming. (Stage 1's standalone default output name still differs; only matters if a stage is run by hand outside the orchestrator.)
 4. **Stage 2 concurrency code — RE-ACTIVATED.** Concurrency is now computed from scratch in `stage_2_concurrencies_and_explode.py` (numpy-optimized, verified against the original). The old precomputed `aggregated_df_11_5.csv` is no longer used (it was stale anyway). Carries `flag`.
-5. **Checker reference-data mismatch** — checker reads raw `merged_session_events.csv`, but choice sets are built from Stage 1 *output* (which has type=7 fix, updated end_times, merged type-2, propagated id_rep). This causes false mismatches when a session was transformed in Stage 1.
+5. **Checker reference-data mismatch — RESOLVED.** The checker read raw `merged_session_events.csv`, but choice sets are built from Stage 1 *output* (type=7 fix, updated end_times, merged type-2, propagated id_rep), so every session Stage 1 transformed produced a false mismatch. `official_checker_18_04.py` now reads `df_1_not_merged_2_merged.csv` (Stage 1 output) plus `df_exploded_all_data.csv` (Stage 2). Consequence: the checker validates **Stage 2 + Stage 3**; Stage 1's own transformations are out of its scope.
 6. **Concurrency bounds — RESOLVED (lower bound → `queue_exit_time`/assignment; upper bound → `<=`).** The mask is `(queue_exit_time < T) & (chat_end_time >= T)` for choice moment `T`. Deep investigation of what these metadata fields are and which bound (if any) wrongly excludes waiting sessions:
    - **What the fields are (proved empirically):** `chat_start_time` **is** the session's **first-message `start_time`** (84.8% exact; diff = 0 at 25/50/75 pct) — i.e. when the customer *sent*, not "agent assigned" as the docs claim. `queue_exit_time` = `chat_start_time + queue_time` (arithmetic identity, ±1 s) = the **assignment / agent-visible** moment. `chat_end_time` is **NOT** the last-message end — only 0.1% match; it's a **late session-close/timeout stamp**, median ~**1,192 s (20 min)** *after* the last event (99.8% > last activity) — a generous marker.
    - **Lower bound — switched to assignment time `queue_exit_time` (advisor decision).** The pre-assignment queue wait (`chat_start → queue_exit`) is irrelevant to the agent's choices: the session wasn't on their plate yet. This aligns Stage 2 with Stage 1's type=7 fix (which already measures `waiting_time` from the agent-visible moment). **Verified safe: 0 new no-chosen sets** across 1,912,783 chosen sessions (an agent is never assigned a session *after* replying, so `queue_exit < reply` always holds for the chosen one). Effect on `workload`: mean **6.60 → 6.25** (~5% lower; median 6, p90 10 unchanged) — a genuine covariate shift, so results are **not** comparable across this change. **`outcome==4` (known-abandonment) sessions are dropped from the pool first** (customer gave up in queue, never assigned; bijection with `queue_exit_time==0`), which both matches Stage 1 and removes every 0-sentinel so no fallback is needed. *(Prior analysis of keeping `chat_start` as a strict `<` lower bound — the 375 early-message sessions, 152 excluded pending alternatives, the 696 proactive openers — is superseded by this switch but was the evidence that the lower bound wasn't wrongly excluding *served* customers.)*
@@ -195,6 +216,8 @@ Both filter raw events to `event_type in [1, 2]` (validate) / `[1, 2, 7]` (check
    - **6 — reply ≥ chat_end but no pending turn** (opener/already-answered). Genuine.
    - **61 — "closed-but-active" (the only real defect):** chosen session had a pending visitor turn but was excluded because the reply landed at/after `chat_end`. **53 fixed** by the Stage 2 upper-bound `<=` change (#6); **8** are hours-late replies left open.
    - So **2,199 of 2,260 are correct behavior** (proactive openers / re-engagements — open *policy* question whether Stage 2 should emit a choice set at all for an agent reply that answers no waiting customer), and only the 61 were a coverage bug (53 now addressed).
+9. **Singleton choice sets — 65.4% of the output — OPEN (policy).** Surfaced by the rewritten checker's structural pass on `df_choicesets_17_07_2026.csv`: **1,225,607 of 1,872,830** sets contain exactly **one** alternative (mean alternatives/set = **1.40**). Not a bug — Stage 2 only emits choice moments with >1 concurrent session, and Stage 3 then skips every alternative with no pending visitor turn, so these are sets where all competitors had already been answered. But a one-alternative set contributes **zero information to a conditional logit** (its likelihood contribution is identically 1). Decide whether to drop them before estimation and, more importantly, whether they indicate the concurrency window is too generous (a session counts as "competing" from assignment to `chat_end` even while it has nothing pending). Related to the open policy question in #8.
+10. **Unresolved `id_rep = 1` placeholder — 3,567 sets (0.2%) — OPEN (minor).** Stage 1's `rep_fix` propagates the first real `id_rep` back over the pre-assignment placeholder `1` per `(id_session, subsession)`; when a subsession contains **no** real agent id at all, the placeholder survives into the choice-set table. This is most of the 4,169 sets where `id_rep` varies *within* a set (the rest are transferred sessions, which appear in `merged_session.csv` under more than one agent). Harmless for estimation as long as `id_rep` is not used as a fixed effect on the choice-set table — Stage 2's concurrency uses the *session metadata* `id_rep`, not the event row's — but worth a fallback in `rep_fix` (e.g. propagate across subsessions) if agent-level covariates are ever added.
 
 ---
 

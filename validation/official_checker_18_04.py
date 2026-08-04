@@ -20,21 +20,21 @@ transformations are out of scope.
 
 The **choice moment** (`T`) — the `end_time` of the agent reply that created the set —
 is taken from the Stage 2 exploded table (`df_exploded_all_data.csv`, column `time`).
-It cannot always be recovered from the choice-set table alone: on a `flag == 1`
-re-engagement set, Stage 3's Option 3 writes the *genuine reply time* into the chosen
-row's `chosen_time`, and ~63% of those sets contain nothing but that one row. Without
-the exploded table the checker falls back to `max(chosen_time)` per set and marks
-affected sets approximate.
+Every emitted row now carries `chosen_time == T` — Option-3 rows included, since they
+borrow an earlier turn but are still measured to the choice moment — so the fallback to
+`max(chosen_time)` when the exploded table is missing is exact rather than approximate.
+The exploded table is still required for the concurrency lists (`no_extra_alternatives`,
+`missing_alternatives_justified`, `workload_matches`), which have no other source.
 
 What is checked
 ---------------
 1. `structural_report()`  — vectorized, over the WHOLE file (cheap, no event lookups):
-   one-chosen-per-set, singleton sets, waiting_time identity, sign/range sanity,
+   one-chosen-per-set, singleton sets, waiting_time identity (bounded on Option-3 rows,
+   whose clock starts at the genuine reply), sign/range sanity,
    per-set constancy of workload/flag/id_rep/choice moment, duplicate alternatives.
 1b. `exploded_report()`   — vectorized, over the WHOLE file, against the Stage 2 table:
    every emitted alternative really was in the agent's concurrency list, `workload`
-   equals that list's length, and `chosen_time` equals the choice moment (except on the
-   Option-3 chosen row, where it must be strictly earlier).
+   equals that list's length, and `chosen_time` equals the choice moment on every row.
 2. `validate_n_messages()` — per-row, event-level, on sampled sets: rebuilds each
    alternative's pending turn from the Stage 1 events using Stage 3's exact rules
    (including the `>=` same-second tie rule and the Option-3 reconstruction) and
@@ -103,10 +103,10 @@ CHECK_DOCS = {
     # validate_n_messages (row level)
     "turn_nonempty": "the alternative has a pending visitor turn at T (Stage 3 would not have skipped it)",
     "turn_reconstructable": "Option-3 (flag=1 chosen) turn could be rebuilt from the session timeline",
-    "chosen_time": "chosen_time equals T (or the genuine reply time on an Option-3 row)",
+    "chosen_time": "chosen_time equals the choice moment T",
     "n_messages": "n_messages equals the number of type-1 messages in the rebuilt turn",
     "first_msg_end_time": "the row's end_time is the FIRST pending message's end_time",
-    "waiting_time": "waiting_time == chosen_time - first pending message end_time",
+    "waiting_time": "waiting_time == T - clock start (first pending message; genuine reply on an Option-3 row)",
     "turn_before_choice": "every message of the turn happened strictly before T",
     "aggregation": "summed covariates equal the sum over the rebuilt turn",
     "turn_unanswered": "no agent reply inside the turn window (exactly one at T if chosen, none if not)",
@@ -215,8 +215,20 @@ def structural_report(df_reg: pd.DataFrame) -> dict:
            df_reg.loc[df_reg.duplicated(["choice_set", "id_session"]), "choice_set"].unique())
 
     # --- per-row identities -------------------------------------------------
-    bad = df_reg["waiting_time"] != df_reg["chosen_time"] - df_reg["end_time"]
-    record("waiting_time_identity", df_reg.loc[bad, "choice_set"].unique())
+    # waiting_time = chosen_time - end_time holds for every normal alternative, whose
+    # clock starts at its first pending message. It does NOT hold on an Option-3 row
+    # (flag=1, chosen=1, no pending turn): there the clock starts at the genuine reply
+    # instead, which is strictly later than the turn's first message, so the row's
+    # waiting_time is strictly SHORTER than the identity would give. The whole-file pass
+    # cannot see the genuine reply — validate_n_messages checks the exact value against
+    # the events — so here we only bound it. flag=1 chosen rows that took the main path
+    # (their session did have a pending turn) still satisfy the identity, hence the OR.
+    span = df_reg["chosen_time"] - df_reg["end_time"]
+    identity_ok = df_reg["waiting_time"] == span
+    option3_shaped = (df_reg["flag"] == 1) & (df_reg["chosen"] == 1)
+    bounded_ok = option3_shaped & (df_reg["waiting_time"] >= 0) & (df_reg["waiting_time"] < span)
+    record("waiting_time_identity",
+           df_reg.loc[~(identity_ok | bounded_ok), "choice_set"].unique())
     record("waiting_time_negative", df_reg.loc[df_reg["waiting_time"] < 0, "choice_set"].unique())
     record("n_messages_positive", df_reg.loc[df_reg["n_messages"] < 1, "choice_set"].unique())
     if "event_type" in df_reg.columns:
@@ -237,12 +249,12 @@ def structural_report(df_reg: pd.DataFrame) -> dict:
     # merged_session.csv under more than one agent.
     record("id_rep_placeholder", df_reg.loc[df_reg["id_rep"] == 1, "choice_set"].unique())
 
-    # chosen_time is constant within a set EXCEPT on flag=1 sets, where Option 3
-    # deliberately gives the chosen row the genuine reply time instead of T.
+    # chosen_time is the choice moment T, written identically onto every alternative —
+    # including the Option-3 chosen row of a flag=1 set, which borrows the earlier turn
+    # but is still measured to T. So it must be constant within EVERY set, no exception.
     ct_var = g["chosen_time"].nunique()
     flag_of_set = g["flag"].max()
-    record("chosen_time_constant_in_flag0_set",
-           ct_var.index[(ct_var > 1) & (flag_of_set == 0)])
+    record("chosen_time_constant_in_set", ct_var.index[ct_var > 1])
 
     # Surviving alternatives are a subset of the concurrency list, so the set can never
     # be larger than the workload it was built from.
@@ -290,18 +302,16 @@ def exploded_report(df_reg: pd.DataFrame, exploded: pd.DataFrame) -> dict:
     record("workload_matches_concurrency",
            df_reg.loc[(df_reg["workload"] != expected_wl) | expected_wl.isna(), "choice_set"])
 
-    # chosen_time == the choice moment, except on the Option-3 chosen row where Stage 3
-    # deliberately substitutes the earlier genuine reply time.
+    # chosen_time == the choice moment, on every row without exception. Option-3 rows
+    # borrow an earlier turn but are still measured to T (they used to carry the genuine
+    # reply time here, which made waiting_time incommensurable inside the set).
     T = df_reg["choice_set"].map(moment)
     is_option3_row = (df_reg["flag"] == 1) & (df_reg["chosen"] == 1)
     record("chosen_time_is_choice_moment",
-           df_reg.loc[~is_option3_row & (df_reg["chosen_time"] != T), "choice_set"])
-    record("option3_time_before_moment",
-           df_reg.loc[is_option3_row & (df_reg["chosen_time"] > T), "choice_set"])
+           df_reg.loc[df_reg["chosen_time"] != T, "choice_set"])
 
     _print_findings(findings, n_sets)
-    n_option3 = int((is_option3_row & (df_reg["chosen_time"] < T)).sum())
-    print(f"\n  Option-3 rows (chosen_time = genuine reply, earlier than T): {n_option3:,}")
+    print(f"\n  flag=1 chosen rows (Option-3 candidates): {int(is_option3_row.sum()):,}")
     return findings
 
 
@@ -331,7 +341,10 @@ def option3_turn(session_events: pd.DataFrame, choice_moment) -> tuple:
 
     The chosen session of a flag=1 set has nothing pending (the agent replied again to a
     session whose visitor said nothing new), so Stage 3 reuses the turn from that
-    session's *genuine* reply and measures waiting_time to that reply instead of to T.
+    session's *genuine* reply. chosen_time is still T, like every other alternative, but
+    the waiting clock STARTS at that genuine reply rather than at the turn's first message:
+    nothing is pending, so the interval being measured is how long the session sat
+    untouched since the agent last dealt with it.
     Returns (turn, genuine_reply_time) or (None, None) when it cannot be rebuilt.
     """
     past = session_events[session_events["end_time"] < choice_moment]
@@ -372,8 +385,8 @@ def validate_n_messages(df_reg: pd.DataFrame, events, choice_moments: dict = Non
 
     `events` is the Stage 1 output (DataFrame or {id_session: events} dict).
     `choice_moments` maps choice_set -> T (from the Stage 2 exploded table); when it is
-    None, T falls back to max(chosen_time) within the set, which is wrong for a flag=1
-    set that contains only its Option-3 chosen row.
+    None, T falls back to max(chosen_time) within the set, which is exact — every row,
+    Option-3 included, is written with chosen_time == T.
 
     Returns {choice_set: {check_name: bool}} — a set passes when all its values are True.
     """
@@ -399,31 +412,43 @@ def validate_n_messages(df_reg: pd.DataFrame, events, choice_moments: dict = Non
                 fail("turn_nonempty")
                 continue
 
-            # Stage 3 took the Option-3 branch exactly when it wrote a chosen_time
-            # earlier than the choice moment (the genuine reply time).
-            used_option3 = (row.chosen == 1 and row.chosen_time != T)
+            # Mirror Stage 3's own branch order: try the main path, and fall back to the
+            # Option-3 reconstruction exactly where Stage 3 does — the chosen row of a
+            # flag=1 set whose pending turn came back empty. (This used to be detected via
+            # `chosen_time != T`, which no longer works now that Option-3 rows also carry
+            # T; keying off the branch condition itself is what Stage 3 actually does.)
+            turn, _ = pending_turn(sess, T)
+            used_option3 = False
 
-            if used_option3:
-                turn, expected_ct = option3_turn(sess, T)
+            waiting_start = None            # None -> first pending message (set below)
+
+            if turn.empty and row.chosen == 1 and getattr(row, "flag", 0) == 1:
+                turn, genuine_reply = option3_turn(sess, T)
                 if turn is None or turn.empty:
                     fail("turn_reconstructable")
                     continue
+                used_option3 = True
+                # The Option-3 clock starts at the genuine reply, not at the turn's first
+                # message: nothing is pending, so what is being measured is how long the
+                # session sat untouched since the agent last dealt with it.
+                waiting_start = genuine_reply
                 note("turn_reconstructable", True)
+            elif turn.empty:
+                fail("turn_nonempty")
+                continue
             else:
-                turn, _ = pending_turn(sess, T)
-                expected_ct = T
-                if turn.empty:
-                    fail("turn_nonempty")
-                    continue
                 note("turn_nonempty", True)
 
             turn = turn.sort_values("end_time")
             first_end = turn["end_time"].iloc[0]
+            if waiting_start is None:
+                waiting_start = first_end
 
-            note("chosen_time", row.chosen_time == expected_ct)
+            # Measured TO T on every row, Option-3 included; only the start differs.
+            note("chosen_time", row.chosen_time == T)
             note("n_messages", row.n_messages == len(turn))
             note("first_msg_end_time", row.end_time == first_end)
-            note("waiting_time", row.waiting_time == expected_ct - first_end)
+            note("waiting_time", row.waiting_time == T - waiting_start)
             note("turn_before_choice", bool((turn["end_time"] < T).all()))
 
             # Criterion 6 of Algorithem_Checker.txt — the aggregation itself.
@@ -465,8 +490,7 @@ def checker(choicesets_list, df_choicesets: pd.DataFrame, events,
 
     Replaces the original 3 checks:
       1. chosen session == session that replied at T           -> kept (`chosen_is_replier`),
-         now resolved against the true choice moment instead of `chosen_time.iloc[0]`,
-         which is the genuine reply time on an Option-3 row.
+         now resolved against the choice moment from the Stage 2 exploded table.
       2. "no events after chosen_time in the window"           -> dropped: the window was
          already filtered to <= chosen_time, so the check could never fail.
       3. set(choice-set sessions) == set(sessions whose last raw event is type 1/7)
@@ -764,8 +788,8 @@ def main(argv=None):
     del exploded_full
     choice_moments = exploded.groupby("index")["time"].first().to_dict() if len(exploded) else None
     if choice_moments is None:
-        print("\n   WARNING: without the exploded table, flag=1 sets that contain only their")
-        print("            Option-3 chosen row get the wrong choice moment and may false-fail.")
+        print("\n   NOTE: without the exploded table, T is taken from chosen_time (exact, but")
+        print("         self-referential) and the concurrency-coverage checks report n-a.")
 
     # Every session the sets touch: the emitted alternatives plus the ones Stage 3 dropped.
     sessions = set(selected["id_session"])

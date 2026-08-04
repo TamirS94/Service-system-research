@@ -158,7 +158,7 @@ If no pending visitor messages exist (the session's last event was an agent repl
 
 `waiting_time` is computed as `choice_time − end_time` where `end_time` is taken from the **first** message in the pending turn. This reflects the total duration the customer has been waiting since they initiated the current unanswered turn. `chosen_time` (= `choice_time`) is emitted as a column for validation and sanity reconstruction.
 
-**Re-engagement injection (`flag = 1`):** a re-engagement reply targets a session with no pending turn, which would otherwise produce a no-chosen choice set. For the chosen alternative of such a set, Stage 3 reconstructs the customer turn from the session's *genuine* reply and injects it as the `chosen = 1` row, measuring `waiting_time` to the genuine reply (the true response latency) rather than to the re-engagement moment.
+**Re-engagement injection (`flag = 1`):** a re-engagement reply targets a session with no pending turn, which would otherwise produce a no-chosen choice set. For the chosen alternative of such a set, Stage 3 reconstructs the customer turn from the session's *genuine* reply and injects it as the `chosen = 1` row. Its `waiting_time` clock **ends at the choice moment** like every other alternative — so `chosen_time` is constant within the set — but **starts at that genuine reply**: with nothing pending there is no customer wait to measure, only how long the session sat untouched since the agent last dealt with it. Consequently `waiting_time = chosen_time − end_time` holds for normal rows but not for these; use the `flag` column to isolate them.
 
 Each output row corresponds to one customer alternative in one choice set, with all predictor variables derived from the customer's pending turn.
 
@@ -194,7 +194,7 @@ The pipeline includes a validation script (`validation/official_checker_18_04.py
 | Issue | Root Cause | Fix |
 |------|------|------|
 | ~51,516 no-chosen choice sets | `event_type = 7` rows appeared as the most recent event before choice time, causing Stage 3 to silently drop those alternatives | Stage 1: propagate type=7 `end_time`/`end_date` to the preceding type=1, then drop type=7 rows |
-| No-chosen sets from re-engagement | Agent re-engaged a session with no new pending customer turn → chosen alternative had no row | Stage 3 `flag = 1` re-engagement injection: reconstruct the chosen row from the session's genuine reply |
+| No-chosen sets from re-engagement | Agent re-engaged a session with no new pending customer turn → chosen alternative had no row | Stage 3 `flag = 1` re-engagement injection: reconstruct the chosen row's turn from the session's genuine reply; clock runs from that reply to the choice moment |
 | Same-second tie drops | A customer message sharing the exact whole-second of the agent's last reply was excluded by a strict `>` comparison, creating spurious no-chosen sets | Stage 3 (and the checker) use `end_time >= last_reply`, consistent with Stage 1's `event_type desc` sort |
 
 ### Known Limitations

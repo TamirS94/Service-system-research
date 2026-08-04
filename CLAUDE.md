@@ -125,8 +125,8 @@ Binary column added to every row (0 for non-type-2). For type-2 rows:
   - `n_messages` = count of messages in the turn
   - DROP: `read_date, read_time, accept_date, accept_time, delay` (`COLS_TO_DROP`)
   - FIRST-row value for everything else
-- `waiting_time = choice_time − end_time of the FIRST pending message` (`choice_time` = `row.time` normally; see Option 3 for the flag=1 exception).
-- `chosen_time` = `choice_time` (i.e. `first pending end_time + waiting_time`) — emitted as a column for the checker / sanity reconstruction.
+- `waiting_time = choice_time − waiting_start`. `choice_time` is **always** `row.time` (= `T`, the choice moment); `waiting_start` is the **end_time of the FIRST pending message** on every normal alternative, and the **genuine reply** on an Option-3 row (see below). So the clock always *ends* at `T`; only where it *starts* differs.
+- `chosen_time` = `choice_time` = `T` on every row — emitted as a column for the checker / sanity reconstruction. Note `chosen_time − end_time == waiting_time` holds for normal rows but **not** for Option-3 rows.
 - Carries `choice_set` (= exploded row index), `chosen`, `chosen_time`, `workload`, `flag`.
 
 ### Option 3 — flag=1 re-engagement injection
@@ -137,7 +137,12 @@ A `flag=1` event is a choice moment whose **chosen** session has no pending visi
 - `genuine_reply_time` = first type-2 **after** `last_type1_time` (the agent's first reply to that turn).
 - turn = type-1 messages between the type-2 before the turn and `last_type1_time`.
 - `n_messages` + summed covariates come from that turn (identical to what the session produced at its genuine reply).
-- **`waiting_time = genuine_reply_time − first pending message`** — response latency of the turn, NOT measured to the re-engagement moment. (Decision: the customer's wait ends at the first reply; later re-engagement messages don't extend it. Cost: within a flag=1 set the chosen row's waiting_time reference differs from the non-chosen alternatives, which use `row.time`. The `flag` column keeps these rows isolable in the regression.)
+- **`waiting_time = row.time − genuine_reply_time`** — the clock **ends at the choice moment `T`, like every other alternative in the set**, but **starts at the genuine reply** rather than at the turn's first message. Nothing is pending on this session, so there is no customer wait to measure; what the agent is responding to is **how long the session has sat untouched since they last dealt with it**. Both definitions are "how long this session has been in its current state at `T`": for a normal alternative that state ("has an unanswered message") began at the first pending message; for an Option-3 row the state ("answered, nothing pending") began at the genuine reply. **Decision (2026-08-04), replacing two earlier rules:** (i) the original `genuine_reply_time − first pending message` measured to the wrong *endpoint*, putting the chosen row on a different clock from its competitors — a conditional logit compares alternatives *within* a set, so that biases the `waiting_time` coefficient on precisely the rows that carry the choice; (ii) `T − first pending message` fixed the endpoint but double-counted the pre-reply wait the customer had already been relieved of. The current rule fixes the endpoint *and* starts the clock at the moment this session's state last changed.
+- **Consequences of the split clock:**
+  - `chosen_time` is now **constant within every choice set** (it previously varied on `flag=1` sets). Any remaining within-set variance in `chosen_time` is a genuine defect.
+  - `waiting_time == chosen_time − end_time` **no longer holds on Option-3 rows** — `end_time` is still the first pending message (a real event attribute of the aggregated turn row, not overwritten), while the clock starts later. The invariant is `0 <= waiting_time < chosen_time − end_time` for these rows; the checker's whole-file pass bounds it and `validate_n_messages` verifies the exact value against the events.
+  - The covariate still measures two different constructs across a `flag=1` set (customer-wait vs. agent-neglect). Use the `flag` column to interact or segment if that distinction matters to the estimate.
+  - **Chained `flag=1` open question:** `genuine_reply_time` is the *first* type-2 after the last visitor message, so in a chain (reply → re-engage → re-engage) the second re-engagement's clock starts at the original genuine reply, not at the intervening re-engagement. That is what "since the genuine reply" means literally; if the intent is "since the agent last touched this session", it should be the max type-2 before `T` instead. Not currently distinguished.
 - `workload` still comes from the current choice moment (`row.workload`) — it's a property of this choice set.
 - Chained flag=1 events auto-resolve: all point at the same most-recent visitor turn, so no cross-choice-set caching is needed.
 - Edge case: a chosen session with no type-1 at all before `row.time` cannot be reconstructed → stays no-chosen (rare).
@@ -155,12 +160,12 @@ python validation/official_checker_18_04.py --choice-sets 3996,756
 python validation/official_checker_18_04.py --structural-only
 ```
 
-**Reference data (the key change).** The checker now reads the **Stage 1 output** (`df_1_not_merged_2_merged.csv`) as the event stream, not a pre-pipeline raw file — that is what Stage 3 was actually built from, so the false mismatches of Known Issue #5 are gone. It also reads the **Stage 2 exploded table** (`df_exploded_all_data.csv`) for the **choice moment `T`** and the concurrency lists. `T` cannot be recovered from the choice-set table alone: on a `flag=1` set, Option 3 writes the *genuine reply time* into the chosen row's `chosen_time`, and ~65% of those sets contain nothing but that row. Without the exploded table the checker falls back to `max(chosen_time)` and warns. Choice-set input defaults to the **newest** `df_choicesets_*.csv`.
+**Reference data (the key change).** The checker now reads the **Stage 1 output** (`df_1_not_merged_2_merged.csv`) as the event stream, not a pre-pipeline raw file — that is what Stage 3 was actually built from, so the false mismatches of Known Issue #5 are gone. It also reads the **Stage 2 exploded table** (`df_exploded_all_data.csv`) for the **choice moment `T`** and the concurrency lists. Since Option 3 now measures to `T` as well, `chosen_time == T` on every row and the `max(chosen_time)` fallback is exact (though self-referential — it can no longer *catch* a wrong `chosen_time`); the exploded table is still required for the concurrency lists, which have no other source. Choice-set input defaults to the **newest** `df_choicesets_*.csv`.
 
 Four validators:
 
-- **`structural_report`** — whole file, vectorized, no event lookups: one-chosen-per-set, no duplicate alternatives, `waiting_time == chosen_time − end_time`, sign/range sanity, per-set constancy of `workload`/`flag`/`chosen_time`(flag=0), `set size <= workload`.
-- **`exploded_report`** — whole file, against Stage 2: every emitted alternative was in the agent's concurrency list, `workload == len(concurrent_sessions)`, `chosen_time == T` (strictly earlier on an Option-3 chosen row).
+- **`structural_report`** — whole file, vectorized, no event lookups: one-chosen-per-set, no duplicate alternatives, `waiting_time == chosen_time − end_time`, sign/range sanity, per-set constancy of `workload`/`flag`/`chosen_time` (no flag exception any more), `set size <= workload`.
+- **`exploded_report`** — whole file, against Stage 2: every emitted alternative was in the agent's concurrency list, `workload == len(concurrent_sessions)`, `chosen_time == T` on every row.
 - **`validate_n_messages`** — sampled sets, event level: rebuilds each alternative's pending turn with Stage 3's exact rules (the `>=` same-second tie rule *and* the Option-3 reconstruction) and verifies `n_messages`, first-pending `end_time`, `waiting_time`, `chosen_time`, the summed covariates (`COLS_TO_SUM`), and that the turn was genuinely unanswered.
 - **`checker`** — sampled sets, set level: exactly one chosen; the chosen session is the only alternative with a reply at `T`; emitted alternatives match the concurrency list, with every dropped alternative justified by Stage 3's "no pending visitor turn" skip rule.
 
@@ -184,7 +189,7 @@ Segmented sampling via `choose_choicets` / `segment_choice`, now seeded (`--seed
 | Choice moment | `end_time` of an agent reply (type=2) |
 | Pending turn | Consecutive type=1 messages since the session's last type=2 |
 | `n_messages` | Count of messages in the pending turn |
-| `waiting_time` | choice_time − end_time of the **first** pending message |
+| `waiting_time` | `T` − clock start: the **first** pending message normally, the **genuine reply** on an Option-3 row |
 | `workload` | concurrent session count (raw `len(concurrent_sessions)`) |
 | `chosen` | 1 for the replied-to session, 0 otherwise |
 

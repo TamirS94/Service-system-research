@@ -40,7 +40,10 @@ Raw input: `raw_events_17_06.csv` (event-level, clean column names + `silent_aba
 | 1 | `stage_1_cleaning_and_unification.py` | `raw_events_17_06.csv` | `df_after_stage1_<date>.csv` (orchestrator: `df_1_not_merged_2_merged.csv`) |
 | 2 | `stage_2_concurrencies_and_explode.py` | `df_1_not_merged_2_merged.csv`, `merged_session.csv` | `df_exploded_all_data.csv`, `before_third_stage_all_data.csv` |
 | 3 | `stage_3_creating_choicesets_from_exploded.py` | `df_1_not_merged_2_merged.csv`, `df_exploded_all_data.csv` | `df_choicesets_<date>.csv` |
+| 4 | `stage_4_analysis_prep.py` | `df_choicesets_<date>.csv` (newest by default), `df_1_not_merged_2_merged.csv`, `df_exploded_all_data.csv` | `df_reg_ready_<date>.csv` |
 | ✓ | `validation/official_checker_18_04.py` | `df_choicesets_<date>.csv` (newest by default), `df_1_not_merged_2_merged.csv`, `df_exploded_all_data.csv` | validation report (stdout) |
+
+Stage 4 is **not** part of `run_pipeline.py` — it is a post-pipeline analysis-prep step, run by hand like the checker.
 
 ---
 
@@ -149,6 +152,67 @@ A `flag=1` event is a choice moment whose **chosen** session has no pending visi
 
 ---
 
+## Stage 4 — Analysis prep (regression-ready table)
+
+`src/stage_4_analysis_prep.py`. Post-pipeline; turns the Stage 3 table into the file the
+conditional logit is estimated on. Run from the repo root:
+
+```
+python src/stage_4_analysis_prep.py                              # newest df_choicesets_*.csv
+python src/stage_4_analysis_prep.py --choicesets df_choicesets_17_08_2026.csv
+python src/stage_4_analysis_prep.py --drop-no-chosen --fcfs-basis end_time
+```
+
+1. **Size filter** — keeps only choice sets with **>1 alternative row**. A one-alternative
+   stratum has a likelihood contribution of exactly 1 (zero information) — Known Issue #9.
+   On `df_choicesets_17_08_2026.csv`: 1,872,830 → **647,223 sets**, 2,624,571 → **1,398,964 rows**
+   (mean 2.16 alternatives/set, max 7). 489 no-chosen strata survive the filter and are kept
+   unless `--drop-no-chosen` (clogit drops them anyway).
+2. **`stickiness`** — 1 on the alternative that is the session the agent replied to at their
+   **previous reply**, chosen or not (alternative-level, so it can actually enter a clogit).
+   The lag is taken from the **event stream**, not from the choice-set table, because the
+   agent's previous reply may never have become a choice moment (Stage 2 keeps only
+   >1-concurrency replies) or may be the chosen row of a no-chosen set. Companions:
+   `stickiness_streak` (consecutive prior replies to that session) and `prev_reply_gap`
+   (seconds since the agent's previous reply — lets a "previous" reply from another shift be
+   excluded). Post-unification, two agent-timeline-consecutive type-2 rows to the same session
+   are always separated by a visitor turn, so a streak is genuinely "came back turn after turn".
+3. **`FCFS`** — 1 on the longest-waiting alternative (what FIFO would pick), plus `fcfs_rank`.
+   Basis is `waiting_time` (max), which on a normal row is exactly `argmin(end_time)`; it
+   differs only on Option-3 rows, where the pipeline deliberately measures from the genuine
+   reply. `--fcfs-basis end_time` gives the literal earliest-message version.
+   Observed FIFO compliance: **50.9%** of chosen rows (chance = 47.4%).
+4. **`session_progress`** — customer messages left in the session after this turn
+   (`total_type1 − index_of_first_pending − n_messages`, matched by `event_id`), plus
+   `session_msgs_total` and `session_progress_pct`. **Look-ahead variable** — the agent cannot
+   know it at `T`; descriptive/segmentation use only, not a clean control.
+
+5. **`n_prior_agent_replies` / `time_since_agent_last_replied`** — alternative-varying, no
+   look-ahead: agent replies to that session strictly before `T` (conversation depth — the
+   clean counterpart of `session_progress`) and `T` minus the last of them (neglect time — the
+   continuous generalisation of `stickiness` and of the Option-3 clock; NA on the 19.9% of rows
+   where the agent has not replied in that session yet). One global `searchsorted` over a
+   packed `session_code << 31 | end_time` key.
+6. **Clock context** — `hour`, `day_band` (night/morning/afternoon/evening), `is_night`, `dow`,
+   plus `shift_id` and `time_in_shift` (a gap > `SHIFT_GAP_SEC` = 60 min in an agent's reply
+   timeline ends a shift; 25,181 shifts, median `time_in_shift` 1.2 h). The epoch columns are
+   the local wall clock stored as UTC, so the hour is a plain modulo — but whether that wall
+   clock is the contact centre's local time is unconfirmed with the data provider.
+
+**Which columns can be main effects.** clogit conditions on the stratum, so anything constant
+within a choice set drops out of the likelihood. Alternative-varying (usable): `FCFS`,
+`fcfs_rank`, `stickiness`, `stickiness_streak`, `n_prior_agent_replies`,
+`time_since_agent_last_replied`, `session_progress`, `session_msgs_total`,
+`session_progress_pct`. Set-level — interactions or sample splits **only**: `set_size`,
+`prev_reply_gap`, `shift_id`, `time_in_shift`, `hour`, `day_band`, `is_night`, `dow`, and the
+pre-existing `workload`, `flag`, `chosen_time`, `id_rep`. Note `corr(workload, set_size) =
+0.057` — open sessions and *waiting* sessions are nearly unrelated, so `workload` is not a
+competition measure; `set_size` is.
+
+Runtime ~30 s. Verified row-by-row against the event stream on sampled sets (stickiness lag,
+FCFS pick, session_progress index arithmetic, multi-message turns, `n_prior_agent_replies`,
+`time_since_agent_last_replied`).
+
 ## Checker — `official_checker_18_04.py`
 
 Rewritten to match the current pipeline. Run from the repo root:
@@ -223,6 +287,11 @@ Segmented sampling via `choose_choicets` / `segment_choice`, now seeded (`--seed
    - So **2,199 of 2,260 are correct behavior** (proactive openers / re-engagements — open *policy* question whether Stage 2 should emit a choice set at all for an agent reply that answers no waiting customer), and only the 61 were a coverage bug (53 now addressed).
 9. **Singleton choice sets — 65.4% of the output — OPEN (policy).** Surfaced by the rewritten checker's structural pass on `df_choicesets_17_07_2026.csv`: **1,225,607 of 1,872,830** sets contain exactly **one** alternative (mean alternatives/set = **1.40**). Not a bug — Stage 2 only emits choice moments with >1 concurrent session, and Stage 3 then skips every alternative with no pending visitor turn, so these are sets where all competitors had already been answered. But a one-alternative set contributes **zero information to a conditional logit** (its likelihood contribution is identically 1). Decide whether to drop them before estimation and, more importantly, whether they indicate the concurrency window is too generous (a session counts as "competing" from assignment to `chat_end` even while it has nothing pending). Related to the open policy question in #8.
 10. **Unresolved `id_rep = 1` placeholder — 3,567 sets (0.2%) — OPEN (minor).** Stage 1's `rep_fix` propagates the first real `id_rep` back over the pre-assignment placeholder `1` per `(id_session, subsession)`; when a subsession contains **no** real agent id at all, the placeholder survives into the choice-set table. This is most of the 4,169 sets where `id_rep` varies *within* a set (the rest are transferred sessions, which appear in `merged_session.csv` under more than one agent). Harmless for estimation as long as `id_rep` is not used as a fixed effect on the choice-set table — Stage 2's concurrency uses the *session metadata* `id_rep`, not the event row's — but worth a fallback in `rep_fix` (e.g. propagate across subsessions) if agent-level covariates are ever added.
+11. **`flag = 1` sets mechanically determine both new covariates — OPEN (decide before estimating).** On the Stage 4 table, `flag = 1` sets are **13.6%** of all sets, and on them:
+    - **`stickiness` on the chosen row is 0 by construction.** `flag = 1` *means* the agent's previous type-2 was to a different session (that is the definition in `agent_unification.py`), so the re-engaged session can never be the sticky alternative. Measured: **0.0%** stay rate on `flag = 1` sets vs **41.5%** on `flag = 0`.
+    - **`FCFS` on the chosen row is near-deterministic: 90.5%** (vs **44.7%** on `flag = 0`). A re-engaged session has usually sat untouched longer than the competitors' pending messages have waited, so the Option-3 clock makes it the longest-waiting alternative almost every time. (Not an artifact of the `waiting_time` basis — the `end_time` basis gives 91.6% on the same sets.)
+
+    Pooled, these sets push the `FCFS` coefficient up and the `stickiness` coefficient down for reasons that are definitional, not behavioural. Either estimate on `flag == 0` and report `flag == 1` separately, or interact both covariates with `flag`.
 
 ---
 

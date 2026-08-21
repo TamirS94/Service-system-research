@@ -1,0 +1,369 @@
+---
+title: "Analyses notebook"
+output: analyses_notebook
+---
+
+[Libraries for working on the data]{.underline}
+
+```{r}
+install.packages("ggplot2")
+install.packages("ggsurvfit")
+```
+
+```{r}
+library(psych)
+library(dplyr)
+library(survival)
+library(stargazer)
+library(ggsurvfit)
+#Reading the dataframe:
+getwd()
+df <- read.csv('df_reg_20_8_choiceset_size.csv')
+```
+
+[**Creating dummy variables:**]{.underline}
+
+[Sentiment:]{.underline}
+
+```{r}
+
+df$neg_sent <- ifelse(df$categorial_sentiment == -1, 1, 0)
+df$neut_sent <- ifelse(df$categorial_sentiment == 0, 1, 0)
+df$pos_sent <- ifelse(df$categorial_sentiment == 1, 1, 0)
+
+```
+
+[Waiting time:]{.underline}
+
+```{r}
+df$waiting_time_fifth_1 <- ifelse(df$waiting_time_fifths == 'fifth_1', 1, 0)
+df$waiting_time_fifth_2 <- ifelse(df$waiting_time_fifths == 'fifth_2', 1, 0)
+df$waiting_time_fifth_3 <- ifelse(df$waiting_time_fifths == 'fifth_3', 1, 0)
+df$waiting_time_fifth_4 <- ifelse(df$waiting_time_fifths == 'fifth_4', 1, 0)
+df$waiting_time_fifth_5 <- ifelse(df$waiting_time_fifths == 'fifth_5', 1, 0)
+```
+
+Slicing to check fifths:
+
+```{r}
+df_subset <- df %>% select(waiting_time_fifths, waiting_time_fifth_1, waiting_time_fifth_2, 
+                           waiting_time_fifth_3, waiting_time_fifth_4, waiting_time_fifth_5)
+```
+
+[msg_perc:]{.underline}
+
+```{r}
+df$msg_perc_fifth_1 <- ifelse(df$msg_perc_fifths == 'fifth_1', 1, 0)
+df$msg_perc_fifth_2 <- ifelse(df$msg_perc_fifths == 'fifth_2', 1, 0)
+df$msg_perc_fifth_3 <- ifelse(df$msg_perc_fifths == 'fifth_3', 1, 0)
+df$msg_perc_fifth_4 <- ifelse(df$msg_perc_fifths == 'fifth_4', 1, 0)
+df$msg_perc_fifth_5 <- ifelse(df$msg_perc_fifths == 'fifth_5', 1, 0)
+```
+
+Slicing to check fifths:
+
+```{r}
+df_subset <- df %>% select(msg_perc_fifths, msg_perc_fifth_1, msg_perc_fifth_2,
+                           msg_perc_fifth_3, msg_perc_fifth_4, msg_perc_fifth_5)
+```
+
+[terminated_by:]{.underline}
+
+```{r}
+df$agent_termination <- ifelse(df$terminated_by_string == 'Agent', 1, 0)
+df$customer_termination <- ifelse(df$terminated_by_string == 'Customer', 1, 0)
+df$manager_termination <- ifelse(df$terminated_by_string == 'Manager', 1, 0)
+df$system_termination <- ifelse(df$terminated_by_string == 'System', 1, 0)
+df$unkown_termination <- ifelse(df$terminated_by_string == '', 1, 0)
+```
+
+Slicing to check:
+
+```{r}
+df_subset <- df %>% select(terminated_by_string, agent_termination, customer_termination, manager_termination, system_termination, unkown_termination)
+```
+
+Categorial satisfaction score:
+
+```{r}
+df$answer_csat_cat = as.factor(df$answer_csat)
+```
+
+```{r}
+contrasts(df_transfers_updated$answer_csat_cat)
+```
+
+```{r}
+custom_contrasts <- matrix(c(
+  1,0,0,0,0,
+  0,0,0,0,0,
+  0,1,0,0,0,
+  0,0,1,0,0,
+  0,0,0,1,0,
+  0,0,0,0,1
+), nrow = 6, byrow= TRUE)
+
+# Assign custom contrasts to the factor
+contrasts(df_transfers_updated$answer_csat_cat) <- custom_contrasts
+
+# Check the applied contrasts
+contrasts(df_transfers_updated$answer_csat_cat)
+```
+
+[**SCALING VARIABLES:**]{.underline}
+
+```{r}
+df$waiting_time_scaled <- scale(df$waiting_time)
+#df$waiting_time_squared_scaled <- scale(df$waiting_time_squared)
+df$number_words_scaled <- scale(df$number_words)
+df$sentiment_scaled <- scale(df$sentiment)
+df$workload_scaled <- scale(df$workload)
+df$msg_perc_scaled <- scale(df$msg_perc)
+```
+
+[**Termination contrasts:**]{.underline}
+
+```{r}
+df <- df %>% filter(terminated_by_factor != "")
+table(df$terminated_by_string)
+df$terminated_by_factor = as.factor(df$terminated_by_string)
+contrasts(df$terminated_by_factor)
+```
+
+Our custom contrasts:
+
+```{r}
+custom_contrasts <- matrix(c(
+  1,0,0,
+  0,1,0,
+  0,0,1,
+  0,0,0
+), nrow = 4, byrow= TRUE)
+
+# Assign custom contrasts to the factor
+contrasts(df$terminated_by_factor) <- custom_contrasts
+
+# Check the applied contrasts
+contrasts(df$terminated_by_factor)
+```
+
+Write all the modifications to a finite CSV:
+
+```{r}
+df$waiting_time_customer_hours <- df$waiting_time_customer / 3600
+df$waiting_time_agent_hours <- df$waiting_time_agent / 3600
+```
+
+# [**MODELS:**]{.underline}
+
+[Model 1]{.underline} - 'waiting time by levels' with termination type, in the latest updated dataframe.
+
+```{r}
+model_1 = clogit(chosen ~ ,data = df)
+
+summary(model_1)
+```
+
+[Model 2]{.underline} - 'waiting time by levels' without termination type, in the latest updated dataframe.
+
+```{r}
+model_2 = clogit(chosen ~ waiting_time_fifth_1 + waiting_time_fifth_2 + waiting_time_fifth_3 + waiting_time_fifth_4 + waiting_time_fifth_5  + msg_perc_fifth_1 + msg_perc_fifth_2 + msg_perc_fifth_3 + msg_perc_fifth_4 + msg_perc_fifth_5 + number_words_scaled + neg_sent + neut_sent + pos_sent + strata(choice_set),data = df_transfers_updated)
+
+summary(model_2)
+```
+
+**Stargazer comparison between model 1 and 2:**
+
+```{r}
+stargazer(model_1, model_2, type="text",  out="models.txt", 
+          title = 'Waiting_time with and without Termination type, dfs with last msg')
+```
+
+[Model 3]{.underline} - rather than including termination_type as variable, do interactions with system_termination as dummy with all the fifths of msg perc and waiting time
+
+```{r}
+model_3 = clogit(chosen ~ waiting_time_fifths * system_termination + msg_perc_fifths* system_termination + number_words_scaled + neg_sent + neut_sent + pos_sent + strata(choice_set),data = df_transfers_updated)
+
+summary(model_3)
+```
+
+```{r}
+model_3.5 = clogit(chosen ~ waiting_time_fifths + msg_perc_fifths * system_termination + number_words_scaled + neg_sent + neut_sent + pos_sent + strata(choice_set),data = df_transfers_updated)
+
+summary(model_3.5)
+```
+
+**Presenting model 3 in Stargazer:**
+
+```{r}
+stargazer(model_3, model_3.5, type="text",  out="models.txt", 
+          title = 'System termination with all fifths of waiting time and msg_perc')
+```
+
+[Model 4]{.underline} - Comparison with binary_csat, as in comparing customers that did and did not answer the satisfaction survey.
+
+```{r}
+model_4 = clogit(chosen ~ waiting_time_fifth_1 * terminated_by_factor + waiting_time_fifth_2 + waiting_time_fifth_3 + waiting_time_fifth_4 + waiting_time_fifth_5  + msg_perc_fifth_1 + msg_perc_fifth_2 + msg_perc_fifth_3 + msg_perc_fifth_4 + msg_perc_fifth_5 + number_words_scaled + neg_sent + neut_sent + pos_sent + binary_csat + strata(choice_set),data = df_transfers_updated)
+
+summary(model_4)
+```
+
+**Presenting model 4 in Stargazer**
+
+```{r}
+stargazer(model_4, type="text",  out="models.txt", 
+          title = 'System termination with all fifths of waiting time and msg_perc and binary csat')
+```
+
+[Model 5]{.underline} - Comparing between different type of scores of satisfaction:
+
+```{r}
+model_5 = clogit(chosen ~ waiting_time_fifth_1 * terminated_by_factor + waiting_time_fifth_2 + waiting_time_fifth_3 + waiting_time_fifth_4 + waiting_time_fifth_5  + msg_perc_fifth_1 + msg_perc_fifth_2 + msg_perc_fifth_3 + msg_perc_fifth_4 + msg_perc_fifth_5 + number_words_scaled + neg_sent + neut_sent + pos_sent + answer_csat_cat + strata(choice_set),data = df_transfers_updated)
+
+summary(model_5)
+```
+
+**Presenting model 5 in Stargazer**
+
+```{r}
+stargazer(model_5, type="text",  out="models.txt", 
+          title = 'System termination with all fifths of waiting time and msg_perc and categorial csat')
+```
+
+[Model 6]{.underline} - Basic model after fixing stickiness:
+
+```{r}
+model_6 = clogit(chosen ~ waiting_time_scaled * stickiness + number_words_scaled + neg_sent + neut_sent + pos_sent + waiting_time_scaled * msg_perc_fifth_1 + msg_perc_fifth_2 + msg_perc_fifth_3 + msg_perc_fifth_4 + waiting_time_scaled * msg_perc_fifth_5 * system_termination + strata(choice_set),data = df_transfers_updated)
+
+summary(model_6)
+```
+
+```{r}
+stargazer(model_6, type="text",  out="models.txt", 
+          title = 'Basic model after fixing stickiness')
+```
+
+# [**Survival models**]{.underline}
+
+level 1: log t (duration of the call) as a function of covariance
+
+```{r}
+df_session <- read.csv('sessions_append_no_none_1_04.csv')
+```
+
+```{r}
+df_session$terminated_binary <- 1
+
+df_session$total_duration_mins <- df_session$total_duration/60
+```
+
+```{r}
+
+filtered_session <- df_session %>% filter(total_duration_mins < 500)
+
+# Fitting the survival model
+Survival_Function = survfit(Surv(total_duration_mins, 
+                                 terminated_binary)~1, data = filtered_session)
+
+survfit2(Surv(total_duration_mins, terminated_binary)~1, data = filtered_session) %>% 
+  ggsurvfit() +
+  labs(
+    x = "minutes",
+    y = "Overall survival probability"
+)
+```
+
+```{r}
+survfit2(Surv(total_duration_mins, terminated_binary)~terminated_by_string, data = df_session) %>% ggsurvfit() +
+  labs(
+    x = "minutes",
+    y = "Overall survival probability"
+)
+```
+
+second level of model: dynamics of the call: what is the sentiment of the customer in the first 5 mins, in the second 10 mins (checkpoints according to the length of the conversation). we need to check how the dataset is suppose to be coded for that model. several x's in diff points in time.
+
+level 2 dependent variable is time of conversation, and variables of conversations (agg of sentiment for example).
+
+termination types:
+
+1- system
+
+2- agent
+
+3- customer
+
+4- manager
+
+# [**Logistic regression models for session level dataframe**]{.underline}
+
+```{r}
+library(psych)
+library(dplyr)
+library(survival)
+library(stargazer)
+library(ggsurvfit)
+#Reading the dataframe:
+df <- read.csv('df_session_with_prioritization_vars_07_07.csv')
+```
+
+```{r}
+options(scipen=999)
+mylogit <- glm(binary_return ~ waiting_time_customer_hours + waiting_time_agent_hours + terminated_by + visitor_number_words + agent_number_words + average_sent, data = df, family="binomial")
+
+summary(mylogit)
+```
+
+**Descriptives regarding waiting times of customer and agent by each type of closure:**
+
+![](images/WhatsApp%20Image%202025-04-13%20at%2019.20.24_a82e33bb.jpg){width="417"}
+
+**Logistic regression for session level with waiting time per agent and customer per quarters**
+
+```{r}
+library(psych)
+library(dplyr)
+library(survival)
+library(stargazer)
+library(ggsurvfit)
+#Reading the dataframe:
+df <- read.csv('df_session_csat.csv')
+```
+
+```{r}
+df$waiting_time_customer_quarter_1_hours <- df$waiting_time_customer_quarter_1 / 3600
+df$waiting_time_customer_quarter_2_hours <- df$waiting_time_customer_quarter_2 / 3600
+df$waiting_time_customer_quarter_3_hours <- df$waiting_time_customer_quarter_3 / 3600
+df$waiting_time_customer_quarter_4_hours <- df$waiting_time_customer_quarter_4 / 3600
+
+
+df$waiting_time_agent_quarter_1_hours <- df$waiting_time_agent_quarter_1 / 3600
+df$waiting_time_agent_quarter_2_hours <- df$waiting_time_agent_quarter_2 / 3600
+df$waiting_time_agent_quarter_3_hours <- df$waiting_time_agent_quarter_3 / 3600
+df$waiting_time_agent_quarter_4_hours <- df$waiting_time_agent_quarter_4 / 3600
+```
+
+```{r}
+options(scipen=999)
+mylogit <- glm(binary_return ~ waiting_time_agent_quarter_1_hours + waiting_time_agent_quarter_2_hours + waiting_time_agent_quarter_3_hours + waiting_time_agent_quarter_4_hours + waiting_time_customer_quarter_1_hours + waiting_time_customer_quarter_2_hours + waiting_time_customer_quarter_3_hours + waiting_time_customer_quarter_4_hours, data = df, family="binomial")
+
+summary(mylogit)
+```
+
+```{r}
+options(scipen=999)
+mylogit <- lm(answer_csat ~ waiting_time_agent_quarter_1_hours + waiting_time_agent_quarter_2_hours + waiting_time_agent_quarter_3_hours + waiting_time_agent_quarter_4_hours + waiting_time_customer_quarter_1_hours + waiting_time_customer_quarter_2_hours + waiting_time_customer_quarter_3_hours + waiting_time_customer_quarter_4_hours, data = df)
+
+summary(mylogit)
+```
+
+```{r}
+options(scipen=999)
+mylogit <- lm(answer_csat ~ from_others_single_chosen_with_last_lag * system_termination, data = df)
+
+summary(mylogit)
+```
+
+```{r}
+df$anti_prioritization_without_last_lag_include_alone <- 1-df$prioritization_without_last_lag_include_alone
+```

@@ -11,3 +11,6 @@ big_code_*.txt
 __pycache__/
 *.pyc
 .Rhistory
+
+# Claude bs
+settings.local.json

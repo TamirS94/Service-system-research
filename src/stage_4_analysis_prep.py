@@ -84,11 +84,13 @@ for _s in (sys.stdout, sys.stderr):
     except Exception:
         pass
 
-os.chdir(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # repo root (script lives in src/)
+os.chdir(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+)  # repo root (script lives in src/)
 
-DEFAULT_EVENTS = "df_1_not_merged_2_merged.csv"    # Stage 1 output = the event stream
-DEFAULT_EXPLODED = "df_exploded_all_data.csv"      # Stage 2 output = choice moments
-SHIFT_GAP_SEC = 3600                               # a gap this long in an agent's replies ends a shift
+DEFAULT_EVENTS = "df_1_not_merged_2_merged.csv"  # Stage 1 output = the event stream
+DEFAULT_EXPLODED = "df_exploded_all_data.csv"  # Stage 2 output = choice moments
+SHIFT_GAP_SEC = 3600  # a gap this long in an agent's replies ends a shift
 
 
 def log(msg=""):
@@ -114,11 +116,15 @@ def filter_multi_alternative(df: pd.DataFrame) -> pd.DataFrame:
     n_sets_before = df["choice_set"].nunique()
     out = df.loc[keep].copy()
     n_sets_after = out["choice_set"].nunique()
-    log(f"   sets  : {n_sets_before:,} -> {n_sets_after:,} "
-        f"({n_sets_before - n_sets_after:,} singletons dropped)")
+    log(
+        f"   sets  : {n_sets_before:,} -> {n_sets_after:,} "
+        f"({n_sets_before - n_sets_after:,} singletons dropped)"
+    )
     log(f"   rows  : {len(df):,} -> {len(out):,}")
-    log(f"   mean alternatives/set: {len(out) / max(n_sets_after, 1):.2f}, "
-        f"max {out['set_size'].max()}")
+    log(
+        f"   mean alternatives/set: {len(out) / max(n_sets_after, 1):.2f}, "
+        f"max {out['set_size'].max()}"
+    )
     return out
 
 
@@ -144,11 +150,15 @@ def add_fcfs(df: pd.DataFrame, basis: str = "waiting_time") -> pd.DataFrame:
     ties = int((per_set > 1).sum())
     chosen = df["chosen"] == 1
     log(f"   FCFS basis: {basis}")
-    log(f"   sets with a tied first arrival (>1 FCFS row): {ties:,} "
-        f"({100 * ties / max(len(per_set), 1):.2f}%)")
-    log(f"   chosen rows that are the FCFS alternative : "
+    log(
+        f"   sets with a tied first arrival (>1 FCFS row): {ties:,} "
+        f"({100 * ties / max(len(per_set), 1):.2f}%)"
+    )
+    log(
+        f"   chosen rows that are the FCFS alternative : "
         f"{int(df.loc[chosen, 'FCFS'].sum()):,} / {int(chosen.sum()):,} "
-        f"({100 * df.loc[chosen, 'FCFS'].mean():.1f}%)  <- FIFO compliance rate")
+        f"({100 * df.loc[chosen, 'FCFS'].mean():.1f}%)  <- FIFO compliance rate"
+    )
     return df
 
 
@@ -164,8 +174,12 @@ def build_reply_lag(events: pd.DataFrame) -> pd.DataFrame:
                       prev_session (1 = they had only just switched to it)
         prev_time     end_time of that previous reply
     """
-    ev2 = events.loc[events["event_type"] == 2, ["event_id", "id_session", "id_rep", "end_time"]]
-    ev2 = ev2.sort_values(["id_rep", "end_time", "event_id"], kind="mergesort").reset_index(drop=True)
+    ev2 = events.loc[
+        events["event_type"] == 2, ["event_id", "id_session", "id_rep", "end_time"]
+    ]
+    ev2 = ev2.sort_values(
+        ["id_rep", "end_time", "event_id"], kind="mergesort"
+    ).reset_index(drop=True)
 
     same_agent = ev2["id_rep"] == ev2["id_rep"].shift(1)
     # Shift = a block of one agent's replies with no gap longer than SHIFT_GAP_SEC.
@@ -180,7 +194,7 @@ def build_reply_lag(events: pd.DataFrame) -> pd.DataFrame:
     # A "run" = consecutive replies by one agent to one session.
     new_run = ~(same_agent & (ev2["id_session"] == ev2["id_session"].shift(1)))
     run_id = new_run.cumsum()
-    within_run = ev2.groupby(run_id).cumcount()                  # 0-based position in the run
+    within_run = ev2.groupby(run_id).cumcount()  # 0-based position in the run
     run_len = ev2.groupby(run_id)["event_id"].transform("size")
     # mid-run       -> the streak so far is the position within the run
     # start of a run -> the streak is the FULL length of the previous run
@@ -202,7 +216,9 @@ def build_reply_lag(events: pd.DataFrame) -> pd.DataFrame:
     )
 
 
-def add_stickiness(df: pd.DataFrame, events: pd.DataFrame, exploded_path: str) -> pd.DataFrame:
+def add_stickiness(
+    df: pd.DataFrame, events: pd.DataFrame, exploded_path: str
+) -> pd.DataFrame:
     lag = build_reply_lag(events)
 
     # choice_set -> the event_id of the agent reply that created it. Stage 2's
@@ -220,25 +236,35 @@ def add_stickiness(df: pd.DataFrame, events: pd.DataFrame, exploded_path: str) -
     df["stickiness_streak"] = np.where(
         df["stickiness"] == 1, reply_id.map(lag["prev_streak"]).fillna(0), 0
     ).astype("int32")
-    df["prev_reply_gap"] = (df["chosen_time"] - reply_id.map(lag["prev_time"])).astype("Int64")
+    df["prev_reply_gap"] = (df["chosen_time"] - reply_id.map(lag["prev_time"])).astype(
+        "Int64"
+    )
     # Set-level shift context (constant within a stratum -> interactions / splits only).
     df["shift_id"] = reply_id.map(lag["shift_id"]).astype("Int32")
     df["time_in_shift"] = reply_id.map(lag["time_in_shift"]).astype("Int32")
 
     chosen = df["chosen"] == 1
     per_set = df.groupby("choice_set")["stickiness"].max()
-    log(f"   sets where the agent's previous session is still an alternative: "
-        f"{int(per_set.sum()):,} / {len(per_set):,} ({100 * per_set.mean():.1f}%)")
-    log(f"   chosen rows that are the sticky alternative: "
+    log(
+        f"   sets where the agent's previous session is still an alternative: "
+        f"{int(per_set.sum()):,} / {len(per_set):,} ({100 * per_set.mean():.1f}%)"
+    )
+    log(
+        f"   chosen rows that are the sticky alternative: "
         f"{int(df.loc[chosen, 'stickiness'].sum()):,} / {int(chosen.sum()):,} "
-        f"({100 * df.loc[chosen, 'stickiness'].mean():.1f}%)  <- raw stay rate")
+        f"({100 * df.loc[chosen, 'stickiness'].mean():.1f}%)  <- raw stay rate"
+    )
     gap = df.loc[chosen & (df["stickiness"] == 1), "prev_reply_gap"].dropna()
     if len(gap):
-        log(f"   gap to the previous reply on sticky+chosen rows (sec): "
-            f"median {int(gap.median()):,}, p90 {int(gap.quantile(0.9)):,}, max {int(gap.max()):,}")
-    log(f"   shifts (reply gap > {SHIFT_GAP_SEC // 60} min): {df['shift_id'].nunique():,} distinct; "
+        log(
+            f"   gap to the previous reply on sticky+chosen rows (sec): "
+            f"median {int(gap.median()):,}, p90 {int(gap.quantile(0.9)):,}, max {int(gap.max()):,}"
+        )
+    log(
+        f"   shifts (reply gap > {SHIFT_GAP_SEC // 60} min): {df['shift_id'].nunique():,} distinct; "
         f"time_in_shift median {df.loc[chosen, 'time_in_shift'].median() / 3600:.1f}h, "
-        f"p90 {df.loc[chosen, 'time_in_shift'].quantile(0.9) / 3600:.1f}h")
+        f"p90 {df.loc[chosen, 'time_in_shift'].quantile(0.9) / 3600:.1f}h"
+    )
     return df
 
 
@@ -263,27 +289,39 @@ def add_session_history(df: pd.DataFrame, events: pd.DataFrame) -> pd.DataFrame:
     ev2 = events.loc[events["event_type"] == 2, ["id_session", "end_time"]]
     codes, _ = pd.factorize(pd.concat([ev2["id_session"], df["id_session"]]), sort=True)
     ev_code = codes[: len(ev2)]
-    row_code = codes[len(ev2):]
+    row_code = codes[len(ev2) :]
 
-    SHIFT = np.int64(1) << 31                       # end_time (< 2^31) never collides with the code
-    key_ev = np.sort(ev_code.astype("int64") * SHIFT + ev2["end_time"].to_numpy("int64"))
-    base = row_code.astype("int64") * SHIFT         # start of this session's block
+    SHIFT = np.int64(1) << 31  # end_time (< 2^31) never collides with the code
+    key_ev = np.sort(
+        ev_code.astype("int64") * SHIFT + ev2["end_time"].to_numpy("int64")
+    )
+    base = row_code.astype("int64") * SHIFT  # start of this session's block
 
-    pos = np.searchsorted(key_ev, base + df["chosen_time"].to_numpy("int64"), side="left")
+    pos = np.searchsorted(
+        key_ev, base + df["chosen_time"].to_numpy("int64"), side="left"
+    )
     start = np.searchsorted(key_ev, base, side="left")
     n_prior = pos - start
 
     last_reply = np.where(n_prior > 0, key_ev[np.maximum(pos - 1, 0)] - base, np.nan)
-    since = np.where(n_prior > 0, df["chosen_time"].to_numpy("int64") - last_reply, np.nan)
+    since = np.where(
+        n_prior > 0, df["chosen_time"].to_numpy("int64") - last_reply, np.nan
+    )
 
     df["n_prior_agent_replies"] = n_prior.astype("int32")
-    df["time_since_agent_last_replied"] = pd.array(since, dtype="Float64").astype("Int64")
+    df["time_since_agent_last_replied"] = pd.array(since, dtype="Float64").astype(
+        "Int64"
+    )
 
-    log(f"   n_prior_agent_replies: mean {n_prior.mean():.2f}, median {np.median(n_prior):.0f}, "
-        f"max {n_prior.max()}; {100 * (n_prior == 0).mean():.1f}% of rows are the session's first turn")
+    log(
+        f"   n_prior_agent_replies: mean {n_prior.mean():.2f}, median {np.median(n_prior):.0f}, "
+        f"max {n_prior.max()}; {100 * (n_prior == 0).mean():.1f}% of rows are the session's first turn"
+    )
     ok = ~np.isnan(since)
-    log(f"   time_since_agent_last_replied (sec): median {np.median(since[ok]):.0f}, "
-        f"p90 {np.quantile(since[ok], 0.9):.0f}, NA {100 * (~ok).mean():.1f}%")
+    log(
+        f"   time_since_agent_last_replied (sec): median {np.median(since[ok]):.0f}, "
+        f"p90 {np.quantile(since[ok], 0.9):.0f}, NA {100 * (~ok).mean():.1f}%"
+    )
     return df
 
 
@@ -302,15 +340,21 @@ def add_time_of_day(df: pd.DataFrame) -> pd.DataFrame:
     hour = (df["chosen_time"] // 3600) % 24
     df["hour"] = hour.astype("int8")
     df["day_band"] = pd.cut(
-        hour, bins=[-1, 5, 11, 17, 23],
+        hour,
+        bins=[-1, 5, 11, 17, 23],
         labels=["night", "morning", "afternoon", "evening"],
     ).astype("str")
     df["is_night"] = hour.isin([22, 23, 0, 1, 2, 3, 4, 5]).astype("int8")
-    df["dow"] = (((df["chosen_time"] // 86400) + 4) % 7).astype("int8")   # 0 = Monday
+    df["dow"] = (((df["chosen_time"] // 86400) + 4) % 7).astype("int8")  # 0 = Monday
 
     sets = df[df["chosen"] == 1]
-    log(f"   day_band (choice moments): "
-        + ", ".join(f"{k} {100 * v:.0f}%" for k, v in sets["day_band"].value_counts(normalize=True).items()))
+    log(
+        f"   day_band (choice moments): "
+        + ", ".join(
+            f"{k} {100 * v:.0f}%"
+            for k, v in sets["day_band"].value_counts(normalize=True).items()
+        )
+    )
     log(f"   is_night: {100 * sets['is_night'].mean():.1f}%")
     return df
 
@@ -339,24 +383,104 @@ def add_session_progress(df: pd.DataFrame, events: pd.DataFrame) -> pd.DataFrame
     total = df["event_id"].map(pos["session_msgs_total"])
     unmatched = int(idx.isna().sum())
     if unmatched:
-        log(f"   [WARN] {unmatched:,} rows whose event_id is not a type-1 event in the event stream")
+        log(
+            f"   [WARN] {unmatched:,} rows whose event_id is not a type-1 event in the event stream"
+        )
 
     progress = total - idx - df["n_messages"]
     negatives = int((progress < 0).sum())
     if negatives:
         # Only possible if the same-second ordering of a turn differs from Stage 3's.
-        log(f"   [WARN] {negatives:,} rows with a negative count (same-second ordering) - clamped to 0")
+        log(
+            f"   [WARN] {negatives:,} rows with a negative count (same-second ordering) - clamped to 0"
+        )
         progress = progress.clip(lower=0)
 
     df["session_msgs_total"] = total.astype("Int32")
     df["session_progress"] = progress.astype("Int32")
     df["session_progress_pct"] = ((total - progress) / total).astype("float32")
 
-    log(f"   session_progress: mean {progress.mean():.2f}, median {progress.median():.0f}, "
-        f"p90 {progress.quantile(0.9):.0f}, max {progress.max():.0f}")
-    log(f"   last-turn-of-session rows (session_progress == 0): "
-        f"{int((progress == 0).sum()):,} ({100 * (progress == 0).mean():.1f}%)")
+    log(
+        f"   session_progress: mean {progress.mean():.2f}, median {progress.median():.0f}, "
+        f"p90 {progress.quantile(0.9):.0f}, max {progress.max():.0f}"
+    )
+    log(
+        f"   last-turn-of-session rows (session_progress == 0): "
+        f"{int((progress == 0).sum()):,} ({100 * (progress == 0).mean():.1f}%)"
+    )
     return df
+
+
+def remove_waiting_time_outliers(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Remove waiting_time outliers using a global 99th-percentile threshold.
+
+    Rules:
+    1. Calculate the 99th percentile of waiting_time across ALL rows.
+    2. A row is an outlier if waiting_time >= the 99th percentile.
+    3. If an outlier row was chosen (chosen == 1), remove the entire choice_set.
+    4. If an outlier belongs to a choice_set with exactly 2 rows,
+       remove the entire choice_set.
+    5. Otherwise, remove only the outlier row and keep the other
+       rows in the choice_set.
+    """
+
+    df = df.copy()
+
+    # Calculate one global P99 across all rows
+    p99 = df["waiting_time"].quantile(0.99)
+
+    # Identify outlier rows
+    outlier = df["waiting_time"] >= p99
+
+    # Choice sets that must be removed entirely
+    remove_choice_sets = set()
+
+    # 1. If an outlier was chosen, remove its entire choice_set
+    chosen_outliers = df.loc[outlier & (df["chosen"] == 1), "choice_set"]
+    remove_choice_sets.update(chosen_outliers)
+
+    # 2. If an outlier belongs to a choice_set with exactly 2 rows,
+    #    remove the entire choice_set
+    choice_set_sizes = df.groupby("choice_set").size()
+
+    two_row_outliers = df.loc[
+        outlier & df["choice_set"].isin(choice_set_sizes[choice_set_sizes == 2].index),
+        "choice_set",
+    ]
+    remove_choice_sets.update(two_row_outliers)
+
+    # 3. Remove entire choice sets identified above
+    remove_entire_set = df["choice_set"].isin(remove_choice_sets)
+
+    # 4. For remaining choice sets, remove only the outlier rows
+    remove_single_outlier = outlier & ~remove_entire_set
+
+    # Final filter
+    df_clean = df.loc[~(remove_entire_set | remove_single_outlier)].copy()
+
+    # Logging / diagnostics
+    n_original = len(df)
+    n_removed = n_original - len(df_clean)
+    n_sets_original = df["choice_set"].nunique()
+    n_sets_removed = len(remove_choice_sets)
+    n_sets_remaining = df_clean["choice_set"].nunique()
+
+    log(f"   Waiting-time P99: {p99:.4f}")
+    log(f"   Outlier rows (waiting_time >= P99): {int(outlier.sum()):,}")
+    log(f"   Choice sets removed entirely: {n_sets_removed:,}")
+    log(
+        f"   Rows removed entirely with their choice set: "
+        f"{int(remove_entire_set.sum()):,}"
+    )
+    log(f"   Individual outlier rows removed: " f"{int(remove_single_outlier.sum()):,}")
+    log(
+        f"   Total rows removed: {n_removed:,} / {n_original:,} "
+        f"({100 * n_removed / max(n_original, 1):.2f}%)"
+    )
+    log(f"   Choice sets: {n_sets_original:,} -> {n_sets_remaining:,}")
+
+    return df_clean
 
 
 # ------------------------------------------------------------------
@@ -364,14 +488,32 @@ def main():
     ap = argparse.ArgumentParser(
         description="Stage 4 - prepare the choice-set table for the conditional logit"
     )
-    ap.add_argument("--choicesets", default=None, help="Stage 3 table (default: newest df_choicesets_*.csv)")
+    ap.add_argument(
+        "--choicesets",
+        default=None,
+        help="Stage 3 table (default: newest df_choicesets_*.csv)",
+    )
     ap.add_argument("--events", default=DEFAULT_EVENTS, help="Stage 1 event stream")
-    ap.add_argument("--exploded", default=DEFAULT_EXPLODED, help="Stage 2 exploded table")
-    ap.add_argument("--out", default=None, help="output CSV (default: df_reg_ready_<today>.csv)")
-    ap.add_argument("--fcfs-basis", choices=["waiting_time", "end_time"], default="waiting_time")
-    ap.add_argument("--drop-no-chosen", action="store_true",
-                    help="also drop strata with no chosen row (they carry no information either)")
-    ap.add_argument("--nrows", type=int, default=None, help="debug: read only the first N choice-set rows")
+    ap.add_argument(
+        "--exploded", default=DEFAULT_EXPLODED, help="Stage 2 exploded table"
+    )
+    ap.add_argument(
+        "--out", default=None, help="output CSV (default: df_reg_ready_<today>.csv)"
+    )
+    ap.add_argument(
+        "--fcfs-basis", choices=["waiting_time", "end_time"], default="waiting_time"
+    )
+    ap.add_argument(
+        "--drop-no-chosen",
+        action="store_true",
+        help="also drop strata with no chosen row (they carry no information either)",
+    )
+    ap.add_argument(
+        "--nrows",
+        type=int,
+        default=None,
+        help="debug: read only the first N choice-set rows",
+    )
     args = ap.parse_args()
 
     t0 = time.time()
@@ -404,15 +546,18 @@ def main():
         df = df[~df["choice_set"].isin(bad)].copy()
         log(f"   dropped {n_no_chosen:,} no-chosen strata ({len(df):,} rows remain)")
     elif n_no_chosen:
-        log(f"   [INFO] {n_no_chosen:,} strata still have no chosen row - clogit drops them "
-            f"anyway; use --drop-no-chosen to remove them here")
+        log(
+            f"   [INFO] {n_no_chosen:,} strata still have no chosen row - clogit drops them "
+            f"anyway; use --drop-no-chosen to remove them here"
+        )
 
     log("\n[3/7] FCFS (first come, first served)...")
     df = add_fcfs(df, args.fcfs_basis)
 
     log("\n[4/7] loading the event stream + stickiness...")
     events = pd.read_csv(
-        args.events, usecols=["event_id", "id_session", "id_rep", "event_type", "end_time"]
+        args.events,
+        usecols=["event_id", "id_session", "id_rep", "event_type", "end_time"],
     )
     log(f"   {len(events):,} events")
     df = add_stickiness(df, events, args.exploded)
@@ -420,23 +565,34 @@ def main():
     log("\n[5/7] session_progress...")
     df = add_session_progress(df, events)
 
-    log("\n[6/7] session history at T (n_prior_agent_replies, time_since_agent_last_replied)...")
+    log(
+        "\n[6/7] session history at T (n_prior_agent_replies, time_since_agent_last_replied)..."
+    )
     df = add_session_history(df, events)
 
     log("\n[7/7] time of day...")
     df = add_time_of_day(df)
 
+    log("\n[8/8] remove waiting time outliers...")
+    df = remove_waiting_time_outliers(df)
+
     log(f"\nwriting {out_path} ...")
     df.to_csv(out_path, index=False)
-    log(f"   {len(df):,} rows x {df.shape[1]} cols, {df['choice_set'].nunique():,} choice sets")
+    log(
+        f"   {len(df):,} rows x {df.shape[1]} cols, {df['choice_set'].nunique():,} choice sets"
+    )
     log(f"\nStage 4 done in {(time.time() - t0) / 60:.1f} min")
     log("\nNew columns")
     log("  alternative-varying (usable as clogit main effects):")
     log("      FCFS, fcfs_rank, stickiness, stickiness_streak, n_prior_agent_replies,")
     log("      time_since_agent_last_replied, session_progress, session_msgs_total,")
     log("      session_progress_pct")
-    log("  set-level - CONSTANT within a stratum, so interactions / sample splits only:")
-    log("      set_size, prev_reply_gap, shift_id, time_in_shift, hour, day_band, is_night, dow")
+    log(
+        "  set-level - CONSTANT within a stratum, so interactions / sample splits only:"
+    )
+    log(
+        "      set_size, prev_reply_gap, shift_id, time_in_shift, hour, day_band, is_night, dow"
+    )
 
 
 if __name__ == "__main__":

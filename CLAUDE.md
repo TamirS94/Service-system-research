@@ -161,6 +161,7 @@ conditional logit is estimated on. Run from the repo root:
 python src/stage_4_analysis_prep.py                              # newest df_choicesets_*.csv
 python src/stage_4_analysis_prep.py --choicesets df_choicesets_17_08_2026.csv
 python src/stage_4_analysis_prep.py --drop-no-chosen --fcfs-basis end_time
+python src/stage_4_analysis_prep.py --words-cap 200 --words-cap-basis message
 ```
 
 1. **Size filter** — keeps only choice sets with **>1 alternative row**. A one-alternative
@@ -198,20 +199,48 @@ python src/stage_4_analysis_prep.py --drop-no-chosen --fcfs-basis end_time
    timeline ends a shift; 25,181 shifts, median `time_in_shift` 1.2 h). The epoch columns are
    the local wall clock stored as UTC, so the hour is a plain modulo — but whether that wall
    clock is the contact centre's local time is unconfirmed with the data provider.
+7. **`session_msgs_left` / `session_progress_perc`** — the same progress idea as #4 but over
+   **all** messages, both sides: every event the session still has after this turn, customer
+   messages *and* agent replies (4 more customer messages + 2 more agent replies → 6).
+   `session_progress_perc = (index_of_first_pending + n_messages) / session_msgs_all` is the
+   share of the whole two-sided conversation completed as of this turn (0.7 = 70% through;
+   1.0 = this turn closes the session), and `session_msgs_all` is the session's total message
+   count. Index arithmetic is the same as #4, on Stage 1's canonical sort (`id_session,
+   end_time asc, event_type desc`) so a same-second agent reply sits *before* the visitor
+   message, exactly as Stage 3 assumes. The turn is contiguous in the all-message ordering by
+   construction (an agent reply in between would have ended it). **Look-ahead**, like #4 —
+   descriptive/segmentation only. `session_progress`/`session_progress_pct` (customer-only)
+   are kept alongside; note `session_progress_pct` is a *customer-message* share, `_perc` the
+   two-sided one.
+8. **`number_words` truncation** — a single message of more than `--words-cap` (default
+   **200**) words counts as 200 (לקטום). `number_words` on a row is Stage 3's SUM over the
+   pending turn, so the cap applies **per message** and the turn is re-summed from the event
+   stream (prefix sums; only the overflow above the cap is subtracted from the stored total,
+   so the row stays consistent with Stage 3). A 3-message turn of 150 words each therefore
+   stays 450. `--words-cap-basis row` instead clips the row total at the cap. The untouched
+   value is always kept as **`number_words_raw`**. Impact is small: 0.03% of type-1 events and
+   ~0.04% of rows exceed 200 words (the untruncated max row was 2,014).
+9. **Waiting-time outlier removal** (Nadav, `cae8d11`) — last step. Global P99 of
+   `waiting_time`; a row at/above it is an outlier. If the outlier is the **chosen** row, or
+   its set has exactly 2 rows, the whole choice set goes; otherwise only that alternative is
+   dropped. ~1.9% of rows.
 
 **Which columns can be main effects.** clogit conditions on the stratum, so anything constant
 within a choice set drops out of the likelihood. Alternative-varying (usable): `FCFS`,
 `fcfs_rank`, `stickiness`, `stickiness_streak`, `n_prior_agent_replies`,
 `time_since_agent_last_replied`, `session_progress`, `session_msgs_total`,
-`session_progress_pct`. Set-level — interactions or sample splits **only**: `set_size`,
+`session_progress_pct`, `session_msgs_left`, `session_msgs_all`, `session_progress_perc`.
+Set-level — interactions or sample splits **only**: `set_size`,
 `prev_reply_gap`, `shift_id`, `time_in_shift`, `hour`, `day_band`, `is_night`, `dow`, and the
 pre-existing `workload`, `flag`, `chosen_time`, `id_rep`. Note `corr(workload, set_size) =
 0.057` — open sessions and *waiting* sessions are nearly unrelated, so `workload` is not a
 competition measure; `set_size` is.
 
-Runtime ~30 s. Verified row-by-row against the event stream on sampled sets (stickiness lag,
-FCFS pick, session_progress index arithmetic, multi-message turns, `n_prior_agent_replies`,
-`time_since_agent_last_replied`).
+Runtime a few minutes (dominated by loading the event stream and writing the CSV). Verified
+row-by-row against the event stream on sampled sets (stickiness lag, FCFS pick,
+session_progress index arithmetic, multi-message turns, `n_prior_agent_replies`,
+`time_since_agent_last_replied`, `session_msgs_left`/`session_progress_perc`, and the
+per-message word cap).
 
 ## Checker — `official_checker_18_04.py`
 

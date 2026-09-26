@@ -171,7 +171,21 @@ python src/stage_4_analysis_prep.py --words-cap 200
 ```
 
 Listed in **execution order** (the order the `[n/11]` steps print). Numbers are from
-`df_choicesets_17_08_2026.csv` → `df_reg_ready_26_09_2026_v2.csv`.
+`df_choicesets_17_08_2026.csv` → `df_reg_ready_26_09_2026.csv` (the current output: 55
+columns, new progress-column names, turn-wise word cap; it was produced as `…_v2.csv` and
+renamed, replacing the pre-fix version).
+
+**Convention — transforms apply to the turn.** A choice-set row is one pending *turn*, so any
+cap / truncation / recode of a covariate (לקטום etc.) applies to the **row value**, not to the
+individual messages inside it, unless explicitly stated otherwise. (The first `number_words`
+cap was built per message and had to be redone — see #9.)
+
+**Linking a row back to its messages.** A row's `event_id` is the turn's **first** customer
+message (Stage 3 keeps first-row values) and `n_messages` is the turn length. The turn's
+messages are contiguous in the session's customer-message order (sort the Stage 1 event
+stream's type-1 rows by `id_session, end_time, event_id`), so the turn = that first message
+plus the next `n_messages − 1`. Re-summing `sentiment` this way matched Stage 3's stored value
+on **all** 1,372,356 rows.
 
 1. **Size filter** — keeps only choice sets with **>1 alternative row**. A one-alternative
    stratum has a likelihood contribution of exactly 1 (zero information) — Known Issue #9.
@@ -191,6 +205,12 @@ Listed in **execution order** (the order the `[n/11]` steps print). Numbers are 
    a stale `set_size`, and 100 became singletons. Running it before anything set-dependent
    fixes all three. Every later step is row-level, so nothing else is affected by the move
    (verified: vs the old output, only `set_size`/`FCFS`/`fcfs_rank` differ, on 2,203 rows).
+   *QA:* the rule was re-derived for every one of the 647,223 sets and compared with the
+   output — **0 mismatches**. Hand-check examples (all one chosen row, `flag = 0`, one rule
+   each): **878211** — 2 rows, the non-chosen row is the outlier (13,315 s) → whole set gone;
+   **1060756** — 3 rows, the chosen row is the only outlier (7,162 s) → whole set gone;
+   **923962** — 3 rows, one non-chosen outlier (9,059 s) → that row gone, set survives with 2
+   rows and FCFS moves to the 80 s row.
 3. **`FCFS`** — 1 on the longest-waiting alternative (what FIFO would pick), plus `fcfs_rank`.
    Basis is `waiting_time` (max), which on a normal row is exactly `argmin(end_time)`; it
    differs only on Option-3 rows, where the pipeline deliberately measures from the genuine
@@ -206,6 +226,8 @@ Listed in **execution order** (the order the `[n/11]` steps print). Numbers are 
    another shift be excluded). Post-unification, two agent-timeline-consecutive type-2 rows to
    the same session are always separated by a visitor turn, so a streak is genuinely "came
    back turn after turn". This step also attaches `shift_id` / `time_in_shift` (see #8).
+   **To be redesigned — see Known Issue #13.**
+
    **Session-progress columns — naming.** Six columns, named `session_progress_<what>_<who>`:
    `<what>` is `total` (messages in the whole session), `left` (messages still to come after
    this turn) or `pct` (share done as of this turn, 0–1); `<who>` is `customers` (customer
@@ -270,7 +292,8 @@ Listed in **execution order** (the order the `[n/11]` steps print). Numbers are 
     linear `sentiment` term mostly cancels out, and capping it barely changed anything. Using
     this column as a categorical with neutral (3) as reference is the same model as
     negative/positive dummies. The coding for the main model is still to be agreed with the
-    advisor.
+    advisor — see Known Issue #14 for the numbers and the suggested way to avoid a
+    specification search.
 
 **Which columns can be main effects.** clogit conditions on the stratum, so anything constant
 within a choice set drops out of the likelihood. Alternative-varying (usable): `FCFS`,
@@ -373,6 +396,54 @@ Segmented sampling via `choose_choicets` / `segment_choice`, now seeded (`--seed
     - **`FCFS` on the chosen row is near-deterministic: 90.5%** (vs **45.2%** on `flag = 0`). A re-engaged session has usually sat untouched longer than the competitors' pending messages have waited, so the Option-3 clock makes it the longest-waiting alternative almost every time. (Not an artifact of the `waiting_time` basis — the `end_time` basis gives 93.7% on the same sets.)
 
     Pooled, these sets push the `FCFS` coefficient up and the `stickiness` coefficient down for reasons that are definitional, not behavioural. Either estimate on `flag == 0` and report `flag == 1` separately, or interact both covariates with `flag`.
+12. **End of sessions ("last leg") — OPEN (decide).** Decide how to treat each session's final
+    messages, which may reflect different behaviour (closing courtesies, wrap-up). Two options
+    under discussion: (a) build an **additional** version of the choice-set table with a fixed
+    number of last messages removed from every session, or (b) cut each session where a
+    **behavioural change is identified**. Related facts: 23.5% of Stage 4 rows are the
+    session's last customer turn (`session_progress_left_customers == 0`), and positive
+    single-message turns are disproportionately last turns (see #14).
+13. **Stickiness — needs a new variable, built in Stage 3 — OPEN.** Current `stickiness`
+    (Stage 4 #4) no longer measures what we want because after the merge a row represents a
+    **turn**, not a message. Plan: create a new stickiness variable in **Stage 3, before the
+    turn aggregation**. To pin down first: current stickiness is computed from the Stage 1 event
+    stream (agent's previous reply), where the relevant merge is Stage 1's **agent-message
+    unification** (consecutive agent messages to one session become one reply, so "the agent
+    stayed" always requires a visitor turn in between); Stage 3's turn aggregation merges
+    *customer* messages. Decide which merge the new variable must precede.
+14. **Sentiment coding for the main model — OPEN (agree with advisor).** Exploratory clogit on
+    the Stage 4 table (552,753 `flag == 0` sets with one chosen row; controls
+    `log1p(waiting_time)`, `FCFS`, `stickiness`, `n_messages`, `log1p(number_words)` — the
+    per-message-capped version at the time; own numpy/scipy fitter, statsmodels is not
+    installed). Log-likelihood gain over no sentiment:
+
+    | Coding | LL gain | Coefficient(s) |
+    |---|---|---|
+    | raw linear | +84 | +0.028 |
+    | cap above only (+3) | +88 | +0.030 |
+    | cap ±3 / ±5 | +57 / +75 | +0.027 / +0.028 |
+    | per-message cap ±3, re-summed | +66 | +0.028 |
+    | mean per message | +15 | +0.016 |
+    | dummies neg / pos (= `sentiment_type_turn`) | +1,013 | −0.29 / −0.15 |
+    | bins ≤−3, −2, −1, +1, +2, ≥+3 (ref 0) | +1,195 | −0.53, −0.28, −0.25, −0.18, −0.08, −0.02 (n.s.) |
+
+    Same pattern on all sets (incl. `flag = 1`). Readings: capping is irrelevant for the fit;
+    the problem is functional form — both signs are chosen *less* than neutral, the negative
+    effect grows with intensity (odds ratio ≈ 0.75 for any negative, ≈ 0.59 at ≤ −3; FCFS ≈
+    1.41, stickiness ≈ 1.54 for scale). LL gains are fit, not effect size — the sentiment
+    effect is sizeable where present but only ~29% of rows are non-zero and 48% of sets vary
+    in sentiment. Post-hoc (label as exploratory): single-message +1 turns have median 3 words
+    and are the session's last customer turn 35% of the time vs 21% for neutral —
+    consistent with closing "thanks".
+    **Suggested procedure (discussed, to avoid a specification search / p-hacking):** choose
+    the main coding on a-priori grounds — the provider's own positive/negative/neutral
+    categories via `sentiment_type_turn`, neutral as reference; show the 6-bin version as a
+    functional-form robustness check; if a cap is ever used, justify it by the distribution
+    (±3 ≈ 1st/99th percentile of row sentiment, 0.96% of rows), not by fit; report every
+    coding tried in an appendix; optional stability check on a split by time or by agent
+    (not random rows — the full data has already been looked at); **cluster standard errors
+    by `id_rep`** in every model (choices by the same agent are not independent, so plain
+    clogit SEs are too small). Write the decision down here before the main estimation.
 
 ---
 
@@ -381,4 +452,8 @@ Segmented sampling via `choose_choicets` / `segment_choice`, now seeded (`--seed
 - `.gitignore`: `*.csv`, `*.pdf`, `*.ipynb`, `*.log`, `big_code_*.txt`, `__pycache__/`, `*.pyc`, `.Rhistory` — data files, notebooks, logs, and cruft are **not** tracked. Pulling/cloning will not bring CSVs; copy data manually.
 - `Choiceset_error_analysis.ipynb` was un-tracked via `git rm --cached` and is ignored on `main`. It lives in the **repo root** (not `notebooks/`) because it reads ~14 data CSVs by bare filename from the root.
 - Remote: `origin` → `https://github.com/TamirS94/Service-system-research.git`.
+- **Location:** moved on 2026-09-26 from `e:\github` to
+  `E:\Users\Tamir\OneDrive - Technion\Service_Systems_Research` (repo, data and history came
+  along; last commit before the move `ca05861`). The folder holds ~16 GB of `big_code_*.txt`
+  logs plus ~6 GB of CSVs, which OneDrive will try to sync.
 - Reference docs: `README.md` + `CLAUDE.md` (root), `docs/data_documentation.md`, `validation/Algorithem_Checker.txt`.

@@ -17,6 +17,12 @@ What it does
        df_filt = df_filt[df_filt['id_session'] > 1]
        df_reg  = df[df['choice_set'].isin(df_filt.index)]
 
+   **`waiting_time` outliers** are removed right after that filter (global P99
+   over the size-filtered rows; a chosen outlier or an outlier in a 2-row set
+   drops the whole set, otherwise only the outlier row goes), and the size
+   filter is re-applied. This runs *before* FCFS so a partial removal can never
+   leave a set without its FCFS row or with a stale `set_size`.
+
 2. **`stickiness`** - inertia / state dependence. `1` on the alternative that is
    the session the agent replied to at their **previous reply**, whether or not
    they stay with it now. Defined for *every* alternative (not only the chosen
@@ -44,25 +50,32 @@ What it does
    `--fcfs-basis end_time` for the literal earliest-message version.
    `fcfs_rank` = 1 for that alternative, 2 for the next longest wait, etc.
 
-4. **`session_progress`** - how many **customer** messages that session still has
+4. **`session_progress_left_customers`** - how many **customer** messages that session still has
    left after this turn, until the session ends. `0` = this turn contains the
-   session's last customer message. Companions: `session_msgs_total` (customer
-   messages in the whole session) and `session_progress_pct` (share of the
+   session's last customer message. Companions: `session_progress_total_customers` (customer
+   messages in the whole session) and `session_progress_pct_customers` (share of the
    session's customer messages completed as of this turn).
    NOTE: this looks into the future of the choice moment - the agent cannot know
    it. Treat it as a descriptive / segmentation variable, not as a clean control.
 
-5. **`session_msgs_left`** - the same idea over **all** messages, both sides: how
+5. **`session_progress_left_all_msg`** - the same idea over **all** messages, both sides: how
    many events of any type (customer messages *and* agent replies) the session
    still has after this turn - 4 more customer messages + 2 more agent replies
-   = 6. `session_progress_perc` is the matching share of the whole conversation
-   that is done as of this turn (0.7 = 70% through) and `session_msgs_all` the
+   = 6. `session_progress_pct_all_msg` is the matching share of the whole conversation
+   that is done as of this turn (0.7 = 70% through) and `session_progress_total_all_msg` the
    session's total message count. Look-ahead as well.
 
-6. **`number_words` truncation** - a single message of more than `--words-cap`
-   (200) words counts as 200. `number_words` on a row is Stage 3's SUM over the
-   pending turn, so the cap applies per *message* and the turn is re-summed; the
-   untouched total is kept as `number_words_raw`.
+6. **`number_words` truncation** - a turn (= a choice-set row) with more than
+   `--words-cap` (200) words counts as 200. The cap is on the row's
+   `number_words`, which is Stage 3's SUM over the pending turn, so every row ends
+   up at most 200. The untouched total is kept as `number_words_raw`.
+
+7. **`sentiment_type_turn`** - `sentiment_type` for the whole pending turn. Stage 3
+   sums `sentiment` over the turn but keeps the *first* message's
+   `sentiment_type`, so on multi-message turns the two disagree. Per message the
+   type is exactly the sign of `sentiment`, so the turn's type is the sign of the
+   summed `sentiment`, in the same codes (1 positive, 2 negative, 3 neutral). The
+   original `sentiment_type` column is left as it is.
 
 Inputs (all read from the repo root, like every other stage)
 ------------------------------------------------------------
@@ -103,7 +116,7 @@ os.chdir(
 DEFAULT_EVENTS = "df_1_not_merged_2_merged.csv"  # Stage 1 output = the event stream
 DEFAULT_EXPLODED = "df_exploded_all_data.csv"  # Stage 2 output = choice moments
 SHIFT_GAP_SEC = 3600  # a gap this long in an agent's replies ends a shift
-WORDS_CAP = 200  # a message longer than this counts as this many words
+WORDS_CAP = 200  # a turn with more words than this counts as this many
 
 
 def log(msg=""):
@@ -289,7 +302,7 @@ def add_session_history(df: pd.DataFrame, events: pd.DataFrame) -> pd.DataFrame:
 
     `n_prior_agent_replies` - agent replies in that session strictly before T
                               (conversation depth; the clean, no-look-ahead
-                              counterpart of session_progress).
+                              counterpart of session_progress_left_customers).
     `time_since_agent_last_replied` - T minus the last of those replies
                               ("neglect time"; the continuous generalisation of
                               stickiness and of the Option-3 clock). NA when the
@@ -373,7 +386,7 @@ def add_time_of_day(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ------------------------------------------------------------------
-# 4. session_progress
+# 4. session_progress_left_customers
 # ------------------------------------------------------------------
 def add_session_progress(df: pd.DataFrame, events: pd.DataFrame) -> pd.DataFrame:
     """Customer messages left in the session after this alternative's turn.
@@ -381,19 +394,19 @@ def add_session_progress(df: pd.DataFrame, events: pd.DataFrame) -> pd.DataFrame
     The row's `event_id` is the FIRST message of the pending turn (Stage 3 keeps
     the first row's values) and the turn is `n_messages` consecutive customer
     messages, so
-        session_progress = total_type1 - index_of_first - n_messages
+        session_progress_left_customers = total_type1 - index_of_first - n_messages
     """
     ev1 = events.loc[events["event_type"] == 1, ["event_id", "id_session", "end_time"]]
     ev1 = ev1.sort_values(["id_session", "end_time", "event_id"], kind="mergesort")
     msg_idx = ev1.groupby("id_session").cumcount()
     msgs_total = ev1.groupby("id_session")["event_id"].transform("size")
     pos = pd.DataFrame(
-        {"msg_idx": msg_idx.to_numpy(), "session_msgs_total": msgs_total.to_numpy()},
+        {"msg_idx": msg_idx.to_numpy(), "session_progress_total_customers": msgs_total.to_numpy()},
         index=pd.Index(ev1["event_id"].to_numpy(), name="event_id"),
     )
 
     idx = df["event_id"].map(pos["msg_idx"])
-    total = df["event_id"].map(pos["session_msgs_total"])
+    total = df["event_id"].map(pos["session_progress_total_customers"])
     unmatched = int(idx.isna().sum())
     if unmatched:
         log(
@@ -409,29 +422,29 @@ def add_session_progress(df: pd.DataFrame, events: pd.DataFrame) -> pd.DataFrame
         )
         progress = progress.clip(lower=0)
 
-    df["session_msgs_total"] = total.astype("Int32")
-    df["session_progress"] = progress.astype("Int32")
-    df["session_progress_pct"] = ((total - progress) / total).astype("float32")
+    df["session_progress_total_customers"] = total.astype("Int32")
+    df["session_progress_left_customers"] = progress.astype("Int32")
+    df["session_progress_pct_customers"] = ((total - progress) / total).astype("float32")
 
     log(
-        f"   session_progress: mean {progress.mean():.2f}, median {progress.median():.0f}, "
+        f"   session_progress_left_customers: mean {progress.mean():.2f}, median {progress.median():.0f}, "
         f"p90 {progress.quantile(0.9):.0f}, max {progress.max():.0f}"
     )
     log(
-        f"   last-turn-of-session rows (session_progress == 0): "
+        f"   last-turn-of-session rows (session_progress_left_customers == 0): "
         f"{int((progress == 0).sum()):,} ({100 * (progress == 0).mean():.1f}%)"
     )
     return df
 
 
 # ------------------------------------------------------------------
-# 7. session_msgs_left - progress over ALL messages (customer + agent)
+# 7. session_progress_left_all_msg - progress over ALL messages (customer + agent)
 # ------------------------------------------------------------------
 def add_session_msgs_left(df: pd.DataFrame, events: pd.DataFrame) -> pd.DataFrame:
     """Messages of ANY type the session still has after this alternative's turn.
 
-    `session_progress` counts only the **customer** messages left;
-    `session_msgs_left` counts every remaining event - customer messages *and*
+    `session_progress_left_customers` counts only the **customer** messages left;
+    `session_progress_left_all_msg` counts every remaining event - customer messages *and*
     agent replies (4 more customer messages + 2 more agent replies -> 6).
 
     The row's `event_id` is the FIRST message of the pending turn and the turn is
@@ -439,15 +452,15 @@ def add_session_msgs_left(df: pd.DataFrame, events: pd.DataFrame) -> pd.DataFram
     have ended it), so in the session's full message ordering the turn occupies
     positions `idx .. idx + n_messages - 1`:
 
-        session_msgs_left     = session_msgs_all - idx - n_messages
-        session_progress_perc = (idx + n_messages) / session_msgs_all
+        session_progress_left_all_msg     = session_progress_total_all_msg - idx - n_messages
+        session_progress_pct_all_msg = (idx + n_messages) / session_progress_total_all_msg
 
     i.e. the share of the whole two-sided conversation completed as of this turn
     (1.0 = this turn contains the session's last message). Ordering is Stage 1's
     canonical sort (`id_session, end_time asc, event_type desc`), so a same-second
     agent reply is placed before the visitor message exactly as Stage 3 assumes.
 
-    NOTE: look-ahead, like `session_progress` - descriptive / segmentation only.
+    NOTE: look-ahead, like `session_progress_left_customers` - descriptive / segmentation only.
     """
     ev = events[["event_id", "id_session", "end_time", "event_type"]].sort_values(
         ["id_session", "end_time", "event_type", "event_id"],
@@ -457,7 +470,7 @@ def add_session_msgs_left(df: pd.DataFrame, events: pd.DataFrame) -> pd.DataFram
     pos = pd.DataFrame(
         {
             "all_idx": ev.groupby("id_session").cumcount().to_numpy(),
-            "session_msgs_all": ev.groupby("id_session")["event_id"]
+            "session_progress_total_all_msg": ev.groupby("id_session")["event_id"]
             .transform("size")
             .to_numpy(),
         },
@@ -465,7 +478,7 @@ def add_session_msgs_left(df: pd.DataFrame, events: pd.DataFrame) -> pd.DataFram
     )
 
     idx = df["event_id"].map(pos["all_idx"])
-    total = df["event_id"].map(pos["session_msgs_all"])
+    total = df["event_id"].map(pos["session_progress_total_all_msg"])
     unmatched = int(idx.isna().sum())
     if unmatched:
         log(f"   [WARN] {unmatched:,} rows whose event_id is not in the event stream")
@@ -480,21 +493,21 @@ def add_session_msgs_left(df: pd.DataFrame, events: pd.DataFrame) -> pd.DataFram
         )
         left = left.clip(lower=0)
 
-    df["session_msgs_all"] = total.astype("Int32")
-    df["session_msgs_left"] = left.astype("Int32")
-    df["session_progress_perc"] = ((total - left) / total).astype("float32")
+    df["session_progress_total_all_msg"] = total.astype("Int32")
+    df["session_progress_left_all_msg"] = left.astype("Int32")
+    df["session_progress_pct_all_msg"] = ((total - left) / total).astype("float32")
 
     log(
-        f"   session_msgs_all : mean {total.mean():.2f}, median {total.median():.0f}, "
+        f"   session_progress_total_all_msg : mean {total.mean():.2f}, median {total.median():.0f}, "
         f"max {total.max():.0f}"
     )
     log(
-        f"   session_msgs_left: mean {left.mean():.2f}, median {left.median():.0f}, "
+        f"   session_progress_left_all_msg: mean {left.mean():.2f}, median {left.median():.0f}, "
         f"p90 {left.quantile(0.9):.0f}, max {left.max():.0f}"
     )
     log(
-        f"   session_progress_perc: mean {df['session_progress_perc'].mean():.3f}, "
-        f"median {df['session_progress_perc'].median():.3f}; "
+        f"   session_progress_pct_all_msg: mean {df['session_progress_pct_all_msg'].mean():.3f}, "
+        f"median {df['session_progress_pct_all_msg'].median():.3f}; "
         f"turns that close the session (== 1.0): "
         f"{int((left == 0).sum()):,} ({100 * (left == 0).mean():.1f}%)"
     )
@@ -502,89 +515,56 @@ def add_session_msgs_left(df: pd.DataFrame, events: pd.DataFrame) -> pd.DataFram
 
 
 # ------------------------------------------------------------------
-# 8. number_words truncation
+# 8. number_words truncation (turn-wise)
 # ------------------------------------------------------------------
-def truncate_number_words(
-    df: pd.DataFrame, events: pd.DataFrame, cap: int = WORDS_CAP, basis: str = "message"
-) -> pd.DataFrame:
-    """Cap very long messages: a message of more than `cap` words counts as `cap`.
+def truncate_number_words(df: pd.DataFrame, cap: int = WORDS_CAP) -> pd.DataFrame:
+    """Cap the TURN's word count: a row with more than `cap` words counts as `cap`.
 
-    `number_words` on a choice-set row is Stage 3's SUM over the pending turn, so
-    "a message with more than 200 words becomes 200" is a statement about the
-    individual *events*, not about the row total - a 3-message turn of 150 words
-    each stays 450.
-
-    basis="message" (default, the literal rule): re-sum the turn from the event
-    stream with every message clipped at `cap` and subtract the excess from the
-    row total. basis="row": clip the row total at `cap`. Either way the untouched
-    value is kept as `number_words_raw`.
+    `number_words` on a choice-set row is Stage 3's SUM over the whole pending turn,
+    and the cap applies to that turn total (not to each message separately), so
+    every row ends up at most `cap`. The untouched value is kept as
+    `number_words_raw`.
     """
     df["number_words_raw"] = df["number_words"]
+    df["number_words"] = df["number_words"].clip(upper=cap)
 
-    if basis == "row":
-        df["number_words"] = df["number_words"].clip(upper=cap)
-        n_hit = int((df["number_words_raw"] > cap).sum())
-        log(f"   basis: row (clip the turn total at {cap})")
-        log(
-            f"   rows truncated: {n_hit:,} ({100 * n_hit / max(len(df), 1):.3f}%), "
-            f"max {int(df['number_words_raw'].max()):,} -> {int(df['number_words'].max()):,}"
-        )
-        return df
-
-    # Per-message cap. Prefix sums over each session's customer messages, so a
-    # turn's capped sum is one subtraction (the turn is contiguous by construction).
-    ev1 = (
-        events.loc[
-            events["event_type"] == 1,
-            ["event_id", "id_session", "end_time", "number_words"],
-        ]
-        .sort_values(["id_session", "end_time", "event_id"], kind="mergesort")
-        .reset_index(drop=True)
-    )
-    w_raw = ev1["number_words"].to_numpy("int64")
-    cum_raw = np.cumsum(w_raw)
-    cum_cap = np.cumsum(np.minimum(w_raw, cap))
-    gpos = pd.Series(
-        np.arange(len(ev1), dtype="int64"),
-        index=pd.Index(ev1["event_id"].to_numpy(), name="event_id"),
-    )
-
-    g = df["event_id"].map(gpos)
-    ok = g.notna().to_numpy()
-    gi = g.fillna(0).to_numpy("int64")
-    end = np.minimum(gi + df["n_messages"].to_numpy("int64") - 1, len(ev1) - 1)
-    before = np.maximum(gi - 1, 0)
-    at_start = gi == 0
-    turn_raw = cum_raw[end] - np.where(at_start, 0, cum_raw[before])
-    turn_cap = cum_cap[end] - np.where(at_start, 0, cum_cap[before])
-
-    raw = df["number_words_raw"].to_numpy("int64")
-    excess = np.where(ok, turn_raw - turn_cap, 0)  # words above the cap in this turn
-    # Subtract only the overflow, so the row stays consistent with Stage 3's sum
-    # even if the turn re-sums slightly differently (same-second ordering).
-    out = np.where(ok, np.maximum(raw - excess, 0), np.minimum(raw, cap))
-    df["number_words"] = out.astype("int64")
-
-    n_hit = int((excess > 0).sum())
-    mismatch = int((turn_raw[ok] != raw[ok]).sum())
-    log(f"   basis: message (cap each message at {cap}, re-sum the turn)")
+    n_hit = int((df["number_words_raw"] > cap).sum())
+    log(f"   cap: turn total at {cap} words")
     log(
-        f"   rows containing a >{cap}-word message: {n_hit:,} "
-        f"({100 * n_hit / max(len(df), 1):.3f}%); "
-        f"rows whose turn TOTAL exceeds {cap}: {int((raw > cap).sum()):,}"
+        f"   rows truncated: {n_hit:,} ({100 * n_hit / max(len(df), 1):.3f}%), "
+        f"max {int(df['number_words_raw'].max()):,} -> {int(df['number_words'].max()):,}, "
+        f"mean {df['number_words_raw'].mean():.2f} -> {df['number_words'].mean():.2f}"
+    )
+    return df
+
+
+# ------------------------------------------------------------------
+# 9. sentiment_type over the whole turn
+# ------------------------------------------------------------------
+def add_sentiment_type_turn(df: pd.DataFrame) -> pd.DataFrame:
+    """sentiment_type recomputed for the whole pending turn.
+
+    Stage 3 SUMs `sentiment` over the turn but keeps the FIRST message's
+    `sentiment_type`, so on multi-message turns the two disagree. Per message,
+    `sentiment_type` is exactly the sign of `sentiment` (1 = positive, 2 = negative,
+    3 = neutral; Dictionary 6), so the turn-level type is the sign of the summed
+    `sentiment`, in the same codes. The original column is left untouched.
+    """
+    s = df["sentiment"]
+    df["sentiment_type_turn"] = np.select([s > 0, s < 0], [1, 2], default=3).astype("int8")
+
+    multi = df["n_messages"] > 1
+    differs = df["sentiment_type_turn"] != df["sentiment_type"]
+    counts = df["sentiment_type_turn"].value_counts()
+    log(
+        f"   positive {counts.get(1, 0):,}, negative {counts.get(2, 0):,}, "
+        f"neutral {counts.get(3, 0):,}"
     )
     log(
-        f"   number_words: max {int(raw.max()):,} -> {int(out.max()):,}, "
-        f"mean {raw.mean():.2f} -> {out.mean():.2f}"
+        f"   rows where it differs from the first-message sentiment_type: "
+        f"{int(differs.sum()):,} ({100 * differs.mean():.1f}%), "
+        f"all multi-message: {bool((~differs | multi).all())}"
     )
-    if mismatch:
-        log(
-            f"   [WARN] {mismatch:,} rows where the turn re-summed from the events differs "
-            f"from the stored number_words (same-second ordering); only the excess above the "
-            f"cap was subtracted, so the row total still matches Stage 3"
-        )
-    if int((~ok).sum()):
-        log(f"   [WARN] {int((~ok).sum()):,} rows fell back to the row-level clip")
     return df
 
 
@@ -689,13 +669,7 @@ def main():
         "--words-cap",
         type=int,
         default=WORDS_CAP,
-        help=f"truncate a message's number_words at this value (default {WORDS_CAP})",
-    )
-    ap.add_argument(
-        "--words-cap-basis",
-        choices=["message", "row"],
-        default="message",
-        help="cap each message and re-sum the turn (default), or clip the row total",
+        help=f"cap a turn's number_words at this value (default {WORDS_CAP})",
     )
     ap.add_argument(
         "--nrows",
@@ -720,15 +694,23 @@ def main():
     log(f"exploded    : {args.exploded}")
     log(f"output      : {out_path}\n")
 
-    log("[1/10] loading the choice-set table...")
+    log("[1/11] loading the choice-set table...")
     df = pd.read_csv(cs_path, nrows=args.nrows)
     df.columns = df.columns.str.strip()
     log(f"   {len(df):,} rows x {df.shape[1]} cols  ({time.time() - t0:.0f}s)")
 
-    log("\n[2/10] dropping single-alternative choice sets...")
+    log("\n[2/11] dropping single-alternative choice sets...")
     df = filter_multi_alternative(df)
 
-    no_chosen = df.groupby("choice_set")["chosen"].sum()
+    # Outliers go BEFORE anything set-dependent (set_size, FCFS): a partial removal
+    # can take out a set's FCFS row or shrink it to one alternative. P99 is still
+    # taken over the size-filtered table, as before.
+    log("\n[3/11] remove waiting time outliers...")
+    df = remove_waiting_time_outliers(df)
+    log("   re-applying the size filter (partial removals can leave a singleton)...")
+    df = filter_multi_alternative(df)
+
+    no_chosen =df.groupby("choice_set")["chosen"].sum()
     n_no_chosen = int((no_chosen == 0).sum())
     if args.drop_no_chosen and n_no_chosen:
         bad = no_chosen.index[no_chosen == 0]
@@ -740,10 +722,10 @@ def main():
             f"anyway; use --drop-no-chosen to remove them here"
         )
 
-    log("\n[3/10] FCFS (first come, first served)...")
+    log("\n[4/11] FCFS (first come, first served)...")
     df = add_fcfs(df, args.fcfs_basis)
 
-    log("\n[4/10] loading the event stream + stickiness...")
+    log("\n[5/11] loading the event stream + stickiness...")
     events = pd.read_csv(
         args.events,
         usecols=[
@@ -752,31 +734,30 @@ def main():
             "id_rep",
             "event_type",
             "end_time",
-            "number_words",
         ],
     )
     log(f"   {len(events):,} events")
     df = add_stickiness(df, events, args.exploded)
 
-    log("\n[5/10] session_progress (customer messages left)...")
+    log("\n[6/11] session_progress_left_customers (customer messages left)...")
     df = add_session_progress(df, events)
 
-    log("\n[6/10] session_msgs_left (all messages left: customer + agent)...")
+    log("\n[7/11] session_progress_left_all_msg (all messages left: customer + agent)...")
     df = add_session_msgs_left(df, events)
 
     log(
-        "\n[7/10] session history at T (n_prior_agent_replies, time_since_agent_last_replied)..."
+        "\n[8/11] session history at T (n_prior_agent_replies, time_since_agent_last_replied)..."
     )
     df = add_session_history(df, events)
 
-    log("\n[8/10] time of day...")
+    log("\n[9/11] time of day...")
     df = add_time_of_day(df)
 
-    log(f"\n[9/10] truncating number_words at {args.words_cap}...")
-    df = truncate_number_words(df, events, args.words_cap, args.words_cap_basis)
+    log(f"\n[10/11] truncating number_words at {args.words_cap}...")
+    df = truncate_number_words(df, args.words_cap)
 
-    log("\n[10/10] remove waiting time outliers...")
-    df = remove_waiting_time_outliers(df)
+    log("\n[11/11] sentiment_type over the whole turn...")
+    df = add_sentiment_type_turn(df)
 
     log(f"\nwriting {out_path} ...")
     df.to_csv(out_path, index=False)
@@ -787,9 +768,9 @@ def main():
     log("\nNew columns")
     log("  alternative-varying (usable as clogit main effects):")
     log("      FCFS, fcfs_rank, stickiness, stickiness_streak, n_prior_agent_replies,")
-    log("      time_since_agent_last_replied, session_progress, session_msgs_total,")
-    log("      session_progress_pct, session_msgs_left, session_msgs_all,")
-    log("      session_progress_perc")
+    log("      time_since_agent_last_replied, session_progress_left_customers, session_progress_total_customers,")
+    log("      session_progress_pct_customers, session_progress_left_all_msg, session_progress_total_all_msg,")
+    log("      session_progress_pct_all_msg, sentiment_type_turn")
     log("  truncated: number_words (original kept as number_words_raw)")
     log(
         "  set-level - CONSTANT within a stratum, so interactions / sample splits only:"

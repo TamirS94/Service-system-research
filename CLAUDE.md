@@ -35,13 +35,13 @@ Raw input: `raw_events_17_06.csv` (event-level, clean column names + `silent_aba
 
 > **`src/run_pipeline.py` auto-chains all three stages** (Stage 1 → 2 → 3) as subprocesses, streaming output to console + a timestamped log. Run from the repo root: `python src/run_pipeline.py` (or `--start-stage 3` to reuse existing Stage 1/2 outputs). Intermediate CSVs are written with the names the next stage expects, so no manual renaming.
 
-| Stage | Script (`src/`) | Reads | Writes |
-|---|---|---|---|
-| 1 | `stage_1_cleaning_and_unification.py` | `raw_events_17_06.csv` | `df_after_stage1_<date>.csv` (orchestrator: `df_1_not_merged_2_merged.csv`) |
-| 2 | `stage_2_concurrencies_and_explode.py` | `df_1_not_merged_2_merged.csv`, `merged_session.csv` | `df_exploded_all_data.csv`, `before_third_stage_all_data.csv` |
-| 3 | `stage_3_creating_choicesets_from_exploded.py` | `df_1_not_merged_2_merged.csv`, `df_exploded_all_data.csv` | `df_choicesets_<date>.csv` |
-| 4 | `stage_4_analysis_prep.py` | `df_choicesets_<date>.csv` (newest by default), `df_1_not_merged_2_merged.csv`, `df_exploded_all_data.csv` | `df_reg_ready_<date>.csv` |
-| ✓ | `validation/official_checker_18_04.py` | `df_choicesets_<date>.csv` (newest by default), `df_1_not_merged_2_merged.csv`, `df_exploded_all_data.csv` | validation report (stdout) |
+| Stage | Script (`src/`)                                | Reads                                                                                                            | Writes                                                                          |
+| ----- | ------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| 1     | `stage_1_cleaning_and_unification.py`          | `raw_events_17_06.csv`                                                                                         | `df_after_stage1_<date>.csv` (orchestrator: `df_1_not_merged_2_merged.csv`) |
+| 2     | `stage_2_concurrencies_and_explode.py`         | `df_1_not_merged_2_merged.csv`, `merged_session.csv`                                                         | `df_exploded_all_data.csv`, `before_third_stage_all_data.csv`               |
+| 3     | `stage_3_creating_choicesets_from_exploded.py` | `df_1_not_merged_2_merged.csv`, `df_exploded_all_data.csv`                                                   | `df_choicesets_<date>.csv`                                                    |
+| 4     | `stage_4_analysis_prep.py`                     | `df_choicesets_<date>.csv` (newest by default), `df_1_not_merged_2_merged.csv`, `df_exploded_all_data.csv` | `df_reg_ready_<date>.csv`                                                     |
+| ✓    | `validation/official_checker_18_04.py`         | `df_choicesets_<date>.csv` (newest by default), `df_1_not_merged_2_merged.csv`, `df_exploded_all_data.csv` | validation report (stdout)                                                      |
 
 Stage 4 is **not** part of `run_pipeline.py` — it is a post-pipeline analysis-prep step, run by hand like the checker.
 
@@ -68,6 +68,7 @@ Replaces the old session-perspective merge (which sorted by `id_session, end_tim
 ### New logic (agent-perspective)
 
 Two type-2 rows merge if and only if:
+
 1. Same `id_rep` (same agent)
 2. Same `id_session` (same session)
 3. No **same-session type-1** between them (visitor replied — new turn)
@@ -76,6 +77,7 @@ Two type-2 rows merge if and only if:
 Type-1 events from **other** sessions are ignored — they are not agent actions.
 
 **Implementation (two-step merge groups):**
+
 - **Step A — within-session runs:** Sort all events by `(id_rep, id_session, end_time, event_type desc)`. Within each `(id_rep, id_session)`, a new run starts when `event_type` changes. This catches same-session type-1 breaks. Other-session events are invisible here (different `id_session` group in the sort).
 - **Step B — agent-timeline groups:** Among type-2 rows sorted by `(id_rep, end_time)`, a new group starts when `id_rep` or `id_session` changes. This catches different-session type-2 breaks.
 - **Final group** breaks when either step triggers.
@@ -87,17 +89,18 @@ Type-1 events from **other** sessions are ignored — they are not agent actions
 ### `flag` column
 
 Binary column added to every row (0 for non-type-2). For type-2 rows:
+
 - `flag = 1` when the row **would have been merged** under the old session-perspective logic (consecutive type-2 in session order) but is **NOT merged** under the new agent-perspective logic (agent's previous type-2 action was in a different session).
 - Computed as: `would_merge_old AND would_NOT_merge_new`.
 
 ### Functions
 
-| Function | Role |
-|---|---|
-| `compute_flag(df)` | Computes flag column before unification |
-| `_assign_merge_groups(df)` | Two-step group assignment (returns groups + type-2 index) |
-| `_merge_group(group, cols)` | Collapses one group into one row |
-| `unify_agent_messages(df)` | Main entry point called from `stage_1.py` |
+| Function                      | Role                                                      |
+| ----------------------------- | --------------------------------------------------------- |
+| `compute_flag(df)`          | Computes flag column before unification                   |
+| `_assign_merge_groups(df)`  | Two-step group assignment (returns groups + type-2 index) |
+| `_merge_group(group, cols)` | Collapses one group into one row                          |
+| `unify_agent_messages(df)`  | Main entry point called from`stage_1.py`                |
 
 ---
 
@@ -127,7 +130,10 @@ Binary column added to every row (0 for non-type-2). For type-2 rows:
   - SUM: `sentiment, duration, number_words, number_chars, number_lines` (`COLS_TO_SUM`)
   - `n_messages` = count of messages in the turn
   - DROP: `read_date, read_time, accept_date, accept_time, delay` (`COLS_TO_DROP`)
-  - FIRST-row value for everything else
+  - FIRST-row value for everything else. **This includes `sentiment_type`**, so on a
+    multi-message turn it is the *first message's* type, while `sentiment` is the whole
+    turn's sum — the two disagree on 67,558 rows of the Stage 4 table (4.9%; all
+    multi-message). Don't model the raw column; use Stage 4's `sentiment_type_turn`.
 - `waiting_time = choice_time − waiting_start`. `choice_time` is **always** `row.time` (= `T`, the choice moment); `waiting_start` is the **end_time of the FIRST pending message** on every normal alternative, and the **genuine reply** on an Option-3 row (see below). So the clock always *ends* at `T`; only where it *starts* differs.
 - `chosen_time` = `choice_time` = `T` on every row — emitted as a column for the checker / sanity reconstruction. Note `chosen_time − end_time == waiting_time` holds for normal rows but **not** for Option-3 rows.
 - Carries `choice_set` (= exploded row index), `chosen`, `chosen_time`, `workload`, `flag`.
@@ -161,86 +167,128 @@ conditional logit is estimated on. Run from the repo root:
 python src/stage_4_analysis_prep.py                              # newest df_choicesets_*.csv
 python src/stage_4_analysis_prep.py --choicesets df_choicesets_17_08_2026.csv
 python src/stage_4_analysis_prep.py --drop-no-chosen --fcfs-basis end_time
-python src/stage_4_analysis_prep.py --words-cap 200 --words-cap-basis message
+python src/stage_4_analysis_prep.py --words-cap 200
 ```
+
+Listed in **execution order** (the order the `[n/11]` steps print). Numbers are from
+`df_choicesets_17_08_2026.csv` → `df_reg_ready_26_09_2026_v2.csv`.
 
 1. **Size filter** — keeps only choice sets with **>1 alternative row**. A one-alternative
    stratum has a likelihood contribution of exactly 1 (zero information) — Known Issue #9.
-   On `df_choicesets_17_08_2026.csv`: 1,872,830 → **647,223 sets**, 2,624,571 → **1,398,964 rows**
-   (mean 2.16 alternatives/set, max 7). 489 no-chosen strata survive the filter and are kept
+   1,872,830 → **647,223 sets**, 2,624,571 → **1,398,964 rows** (mean 2.16 alternatives/set,
+   max 7).
+2. **Waiting-time outlier removal** (Nadav, `cae8d11`) — global P99 of `waiting_time` over the
+   size-filtered rows (**6002 s**); a row at/above it is an outlier. If the outlier is the
+   **chosen** row, or its set has exactly 2 rows, the whole choice set goes; otherwise only
+   that alternative is dropped. 13,992 outlier rows → 12,088 sets dropped whole (6,149 by the
+   2-row rule, 5,939 by the chosen rule) + 1,283 single rows from 1,170 sets; ~1.9% of rows.
+   The size filter is then **re-applied**, dropping the 100 sets a partial removal left with
+   one row. Final: **635,035 sets, 1,372,356 rows**; 481 no-chosen strata remain and are kept
    unless `--drop-no-chosen` (clogit drops them anyway).
-2. **`stickiness`** — 1 on the alternative that is the session the agent replied to at their
-   **previous reply**, chosen or not (alternative-level, so it can actually enter a clogit).
-   The lag is taken from the **event stream**, not from the choice-set table, because the
-   agent's previous reply may never have become a choice moment (Stage 2 keeps only
-   >1-concurrency replies) or may be the chosen row of a no-chosen set. Companions:
-   `stickiness_streak` (consecutive prior replies to that session) and `prev_reply_gap`
-   (seconds since the agent's previous reply — lets a "previous" reply from another shift be
-   excluded). Post-unification, two agent-timeline-consecutive type-2 rows to the same session
-   are always separated by a visitor turn, so a streak is genuinely "came back turn after turn".
+   *Why it runs here, not last:* it originally ran as the final step, after `set_size` and
+   `FCFS` were computed. In every partially trimmed set the removed outlier was the
+   longest-waiting row, i.e. the FCFS row, so all 1,170 of them ended with **no FCFS row** and
+   a stale `set_size`, and 100 became singletons. Running it before anything set-dependent
+   fixes all three. Every later step is row-level, so nothing else is affected by the move
+   (verified: vs the old output, only `set_size`/`FCFS`/`fcfs_rank` differ, on 2,203 rows).
 3. **`FCFS`** — 1 on the longest-waiting alternative (what FIFO would pick), plus `fcfs_rank`.
    Basis is `waiting_time` (max), which on a normal row is exactly `argmin(end_time)`; it
    differs only on Option-3 rows, where the pipeline deliberately measures from the genuine
    reply. `--fcfs-basis end_time` gives the literal earliest-message version.
-   Observed FIFO compliance: **50.9%** of chosen rows (chance = 47.4%).
-4. **`session_progress`** — customer messages left in the session after this turn
-   (`total_type1 − index_of_first_pending − n_messages`, matched by `event_id`), plus
-   `session_msgs_total` and `session_progress_pct`. **Look-ahead variable** — the agent cannot
-   know it at `T`; descriptive/segmentation use only, not a clean control.
+   Observed FIFO compliance: **51.1%** of chosen rows (chance = 48.4%).
+4. **`stickiness`** — 1 on the alternative that is the session the agent replied to at their
+   **previous reply**, chosen or not (alternative-level, so it can actually enter a clogit).
+   The lag is taken from the **event stream**, not from the choice-set table, because the
+   agent's previous reply may never have become a choice moment (Stage 2 keeps only
+   replies with >1 concurrent session) or may be the chosen row of a no-chosen set.
+   Companions: `stickiness_streak` (consecutive prior replies to that session) and
+   `prev_reply_gap` (seconds since the agent's previous reply — lets a "previous" reply from
+   another shift be excluded). Post-unification, two agent-timeline-consecutive type-2 rows to
+   the same session are always separated by a visitor turn, so a streak is genuinely "came
+   back turn after turn". This step also attaches `shift_id` / `time_in_shift` (see #8).
+   **Session-progress columns — naming.** Six columns, named `session_progress_<what>_<who>`:
+   `<what>` is `total` (messages in the whole session), `left` (messages still to come after
+   this turn) or `pct` (share done as of this turn, 0–1); `<who>` is `customers` (customer
+   messages only) or `all_msg` (customer messages **and** agent replies). Renamed on
+   2026-09-26 because the old names were easy to confuse — older CSVs use the old names:
 
-5. **`n_prior_agent_replies` / `time_since_agent_last_replied`** — alternative-varying, no
+   | New | Old |
+   |---|---|
+   | `session_progress_total_customers` | `session_msgs_total` |
+   | `session_progress_left_customers` | `session_progress` |
+   | `session_progress_pct_customers` | `session_progress_pct` |
+   | `session_progress_total_all_msg` | `session_msgs_all` |
+   | `session_progress_left_all_msg` | `session_msgs_left` |
+   | `session_progress_pct_all_msg` | `session_progress_perc` |
+
+   All six are **look-ahead** variables (they use the session's future length, which the agent
+   cannot know at `T`) — descriptive/segmentation use only, not clean controls.
+5. **`session_progress_*_customers`** — counts **customer messages only**.
+   `left = total − index_of_first_pending − n_messages` (matched by `event_id`);
+   `pct = (total − left) / total`.
+6. **`session_progress_*_all_msg`** — the same idea over **all** messages, both sides: e.g. 4
+   more customer messages + 2 more agent replies → `left = 6`.
+   `pct = (index_of_first_pending + n_messages) / total` is the share of the whole two-sided
+   conversation completed as of this turn (0.7 = 70% through; 1.0 = this turn closes the
+   session). Agent replies are counted **after Stage 1's unification**, so consecutive agent
+   messages to the same session that were merged count as one reply. Index arithmetic is the
+   same as #5, on Stage 1's canonical sort (`id_session, end_time asc, event_type desc`) so a
+   same-second agent reply sits *before* the visitor message, exactly as Stage 3 assumes. The
+   turn is contiguous in the all-message ordering by construction (an agent reply in between
+   would have ended it).
+7. **`n_prior_agent_replies` / `time_since_agent_last_replied`** — alternative-varying, no
    look-ahead: agent replies to that session strictly before `T` (conversation depth — the
-   clean counterpart of `session_progress`) and `T` minus the last of them (neglect time — the
-   continuous generalisation of `stickiness` and of the Option-3 clock; NA on the 19.9% of rows
+   clean counterpart of `session_progress_left_customers`) and `T` minus the last of them (neglect time — the
+   continuous generalisation of `stickiness` and of the Option-3 clock; NA on the 20.1% of rows
    where the agent has not replied in that session yet). One global `searchsorted` over a
    packed `session_code << 31 | end_time` key.
-6. **Clock context** — `hour`, `day_band` (night/morning/afternoon/evening), `is_night`, `dow`,
+8. **Clock context** — `hour`, `day_band` (night/morning/afternoon/evening), `is_night`, `dow`,
    plus `shift_id` and `time_in_shift` (a gap > `SHIFT_GAP_SEC` = 60 min in an agent's reply
-   timeline ends a shift; 25,181 shifts, median `time_in_shift` 1.2 h). The epoch columns are
+   timeline ends a shift; 24,865 shifts, median `time_in_shift` 1.2 h). The epoch columns are
    the local wall clock stored as UTC, so the hour is a plain modulo — but whether that wall
    clock is the contact centre's local time is unconfirmed with the data provider.
-7. **`session_msgs_left` / `session_progress_perc`** — the same progress idea as #4 but over
-   **all** messages, both sides: every event the session still has after this turn, customer
-   messages *and* agent replies (4 more customer messages + 2 more agent replies → 6).
-   `session_progress_perc = (index_of_first_pending + n_messages) / session_msgs_all` is the
-   share of the whole two-sided conversation completed as of this turn (0.7 = 70% through;
-   1.0 = this turn closes the session), and `session_msgs_all` is the session's total message
-   count. Index arithmetic is the same as #4, on Stage 1's canonical sort (`id_session,
-   end_time asc, event_type desc`) so a same-second agent reply sits *before* the visitor
-   message, exactly as Stage 3 assumes. The turn is contiguous in the all-message ordering by
-   construction (an agent reply in between would have ended it). **Look-ahead**, like #4 —
-   descriptive/segmentation only. `session_progress`/`session_progress_pct` (customer-only)
-   are kept alongside; note `session_progress_pct` is a *customer-message* share, `_perc` the
-   two-sided one.
-8. **`number_words` truncation** — a single message of more than `--words-cap` (default
-   **200**) words counts as 200 (לקטום). `number_words` on a row is Stage 3's SUM over the
-   pending turn, so the cap applies **per message** and the turn is re-summed from the event
-   stream (prefix sums; only the overflow above the cap is subtracted from the stored total,
-   so the row stays consistent with Stage 3). A 3-message turn of 150 words each therefore
-   stays 450. `--words-cap-basis row` instead clips the row total at the cap. The untouched
-   value is always kept as **`number_words_raw`**. Impact is small: 0.03% of type-1 events and
-   ~0.04% of rows exceed 200 words (the untruncated max row was 2,014).
-9. **Waiting-time outlier removal** (Nadav, `cae8d11`) — last step. Global P99 of
-   `waiting_time`; a row at/above it is an outlier. If the outlier is the **chosen** row, or
-   its set has exactly 2 rows, the whole choice set goes; otherwise only that alternative is
-   dropped. ~1.9% of rows.
+9. **`number_words` truncation — turn-wise** — a **turn** (= one choice-set row) with more
+   than `--words-cap` (default **200**) words counts as 200 (לקטום). The cap is applied to the
+   row's `number_words`, which is Stage 3's SUM over the whole pending turn, so **every row is
+   at most 200** (a 3-message turn of 150 words each → 200). The untouched value is kept as
+   **`number_words_raw`**. 1,627 rows (0.12%) are capped; max 2,014 → 200, mean 16.33 → 16.23.
+   *History:* the first version capped each **message** at 200 and re-summed the turn, which
+   left 1,052 rows above 200 (max 1,372). That misread the intended rule; it was replaced by
+   the turn-wise cap and the `--words-cap-basis` option was removed.
+10. **`sentiment_type_turn`** — `sentiment_type` for the **whole pending turn**, in the
+    provider's codes (Dictionary 6: 1 positive, 2 negative, 3 neutral). Needed because Stage 3
+    keeps the first message's `sentiment_type` but sums `sentiment` (see Stage 3). Per customer
+    message, `sentiment_type` is **exactly the sign of `sentiment`** (verified on all 1.95M
+    type-1 events; codes 4/5 "not relevant"/"unknown" never occur, so a 0 is a labelled
+    *neutral*, not missing), so the turn's type is the sign of the summed `sentiment`.
+    Equal to `sentiment_type` on every single-message row; differs on 67,558 multi-message rows
+    (mostly first message neutral, turn net negative: 35,703, or net positive: 27,080). Counts:
+    positive 255,809, negative 139,934, neutral 976,613. The original column is untouched.
+    *Context (exploratory, not a decision):* `sentiment` is an integer score (row level −34..+16,
+    71% zeros, the long tail is the negative one), and in a quick clogit with basic controls
+    both negative **and** positive turns were chosen less often than neutral ones — so a single
+    linear `sentiment` term mostly cancels out, and capping it barely changed anything. Using
+    this column as a categorical with neutral (3) as reference is the same model as
+    negative/positive dummies. The coding for the main model is still to be agreed with the
+    advisor.
 
 **Which columns can be main effects.** clogit conditions on the stratum, so anything constant
 within a choice set drops out of the likelihood. Alternative-varying (usable): `FCFS`,
 `fcfs_rank`, `stickiness`, `stickiness_streak`, `n_prior_agent_replies`,
-`time_since_agent_last_replied`, `session_progress`, `session_msgs_total`,
-`session_progress_pct`, `session_msgs_left`, `session_msgs_all`, `session_progress_perc`.
+`time_since_agent_last_replied`, `session_progress_left_customers`, `session_progress_total_customers`,
+`session_progress_pct_customers`, `session_progress_left_all_msg`, `session_progress_total_all_msg`, `session_progress_pct_all_msg`,
+`sentiment_type_turn` (categorical — enter as dummies, neutral = 3 as reference).
 Set-level — interactions or sample splits **only**: `set_size`,
 `prev_reply_gap`, `shift_id`, `time_in_shift`, `hour`, `day_band`, `is_night`, `dow`, and the
-pre-existing `workload`, `flag`, `chosen_time`, `id_rep`. Note `corr(workload, set_size) =
-0.057` — open sessions and *waiting* sessions are nearly unrelated, so `workload` is not a
+pre-existing `workload`, `flag`, `chosen_time`, `id_rep`. Note `corr(workload, set_size) = 0.057` — open sessions and *waiting* sessions are nearly unrelated, so `workload` is not a
 competition measure; `set_size` is.
 
-Runtime a few minutes (dominated by loading the event stream and writing the CSV). Verified
+Runtime under a minute on the full table (dominated by loading the event stream and writing the CSV). Verified
 row-by-row against the event stream on sampled sets (stickiness lag, FCFS pick,
-session_progress index arithmetic, multi-message turns, `n_prior_agent_replies`,
-`time_since_agent_last_replied`, `session_msgs_left`/`session_progress_perc`, and the
-per-message word cap).
+session_progress_left_customers index arithmetic, multi-message turns, `n_prior_agent_replies`,
+`time_since_agent_last_replied`, `session_progress_left_all_msg`/`session_progress_pct_all_msg`), and the
+turn-wise word cap on the whole file (max 200; exactly the 1,627 rows with a raw total above
+200 changed, each to 200).
 
 ## Checker — `official_checker_18_04.py`
 
@@ -276,15 +324,15 @@ Segmented sampling via `choose_choicets` / `segment_choice`, now seeded (`--seed
 
 ## Key Definitions
 
-| Term | Meaning |
-|---|---|
-| Choice set | All sessions waiting for one agent at the moment of an agent reply |
-| Choice moment | `end_time` of an agent reply (type=2) |
-| Pending turn | Consecutive type=1 messages since the session's last type=2 |
-| `n_messages` | Count of messages in the pending turn |
+| Term             | Meaning                                                                                                            |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------ |
+| Choice set       | All sessions waiting for one agent at the moment of an agent reply                                                 |
+| Choice moment    | `end_time` of an agent reply (type=2)                                                                            |
+| Pending turn     | Consecutive type=1 messages since the session's last type=2                                                        |
+| `n_messages`   | Count of messages in the pending turn                                                                              |
 | `waiting_time` | `T` − clock start: the **first** pending message normally, the **genuine reply** on an Option-3 row |
-| `workload` | concurrent session count (raw `len(concurrent_sessions)`) |
-| `chosen` | 1 for the replied-to session, 0 otherwise |
+| `workload`     | concurrent session count (raw`len(concurrent_sessions)`)                                                         |
+| `chosen`       | 1 for the replied-to session, 0 otherwise                                                                          |
 
 **event_type:** 1=visitor msg, 2=agent reply, 7=leaves queue (agent first sees session), 8/9=parallel-chat overhead (dropped).
 **outcome:** 1=served, 2=served+transferred, 3=silent abandonment, 4=known abandonment, 5=reject invite, 6=no survey.
@@ -299,15 +347,18 @@ Segmented sampling via `choose_choicets` / `segment_choice`, now seeded (`--seed
 4. **Stage 2 concurrency code — RE-ACTIVATED.** Concurrency is now computed from scratch in `stage_2_concurrencies_and_explode.py` (numpy-optimized, verified against the original). The old precomputed `aggregated_df_11_5.csv` is no longer used (it was stale anyway). Carries `flag`.
 5. **Checker reference-data mismatch — RESOLVED.** The checker read raw `merged_session_events.csv`, but choice sets are built from Stage 1 *output* (type=7 fix, updated end_times, merged type-2, propagated id_rep), so every session Stage 1 transformed produced a false mismatch. `official_checker_18_04.py` now reads `df_1_not_merged_2_merged.csv` (Stage 1 output) plus `df_exploded_all_data.csv` (Stage 2). Consequence: the checker validates **Stage 2 + Stage 3**; Stage 1's own transformations are out of its scope.
 6. **Concurrency bounds — RESOLVED (lower bound → `queue_exit_time`/assignment; upper bound → `<=`).** The mask is `(queue_exit_time < T) & (chat_end_time >= T)` for choice moment `T`. Deep investigation of what these metadata fields are and which bound (if any) wrongly excludes waiting sessions:
+
    - **What the fields are (proved empirically):** `chat_start_time` **is** the session's **first-message `start_time`** (84.8% exact; diff = 0 at 25/50/75 pct) — i.e. when the customer *sent*, not "agent assigned" as the docs claim. `queue_exit_time` = `chat_start_time + queue_time` (arithmetic identity, ±1 s) = the **assignment / agent-visible** moment. `chat_end_time` is **NOT** the last-message end — only 0.1% match; it's a **late session-close/timeout stamp**, median ~**1,192 s (20 min)** *after* the last event (99.8% > last activity) — a generous marker.
    - **Lower bound — switched to assignment time `queue_exit_time` (advisor decision).** The pre-assignment queue wait (`chat_start → queue_exit`) is irrelevant to the agent's choices: the session wasn't on their plate yet. This aligns Stage 2 with Stage 1's type=7 fix (which already measures `waiting_time` from the agent-visible moment). **Verified safe: 0 new no-chosen sets** across 1,912,783 chosen sessions (an agent is never assigned a session *after* replying, so `queue_exit < reply` always holds for the chosen one). Effect on `workload`: mean **6.60 → 6.25** (~5% lower; median 6, p90 10 unchanged) — a genuine covariate shift, so results are **not** comparable across this change. **`outcome==4` (known-abandonment) sessions are dropped from the pool first** (customer gave up in queue, never assigned; bijection with `queue_exit_time==0`), which both matches Stage 1 and removes every 0-sentinel so no fallback is needed. *(Prior analysis of keeping `chat_start` as a strict `<` lower bound — the 375 early-message sessions, 152 excluded pending alternatives, the 696 proactive openers — is superseded by this switch but was the evidence that the lower bound wasn't wrongly excluding *served* customers.)*
    - **Upper bound — loosen to `<=` (same-second only).** `chat_end_time` is whole-second; a reply can land on the exact second of the metadata close while the visitor turn is open. Strict `>` dropped **53** genuinely closed-but-active *chosen* sessions (+~228 good-set alternatives; **281** total). `ends > reply` → `ends >= reply` recovers them (reply coincides with close = agent actively answering).
    - **The "35k dropped waiting alternatives" scare — a mirage, no further change.** Because `chat_end` is a *late* stamp, ~**35,167** sessions have a pending `type=1` at some same-agent reply `T ≥ chat_end` (within 1 h). Classified: **47%** served + short single trailing message (courtesy/closing, e.g. "thanks"), **12.4%** abandonment (`outcome=3`, customer already left), **40.6%** served + substantive trailing message. All occur *after* an already-generous close, so the customer is almost certainly gone — none are clear live waiting customers. The strict-ish upper bound (with the `<=` same-second fix) is therefore correct; **do not** switch to event-stream-based concurrency to "recover" them.
    - **Net change to Stage 2:** lower bound → `queue_exit_time` + drop `outcome==4`; upper bound `<=`. **Takes effect on the next Stage 2 re-run.**
 7. **Same-second tie — two separate problems.** When a visitor (type=1) and an agent reply (type=2) share the exact same whole-second `end_time`, two distinct issues arise:
+
    - **Problem 1 — Stage 3 ignored Stage 1's sort order — FIXED (`>` → `>=`).** Stage 1 sorts ties by `event_type desc` (so a same-second visitor message sorts *after* the reply = pending), but Stage 3 used a strict `end_time > last_reply`, which drops the tied message — so the sort's decision never reached the result (e.g. choice_set 3996 became a spurious no-chosen set). Changed to `end_time >= last_reply` in `stage_3` (main path + Option 3 turn lower bound) and in the checker's `validate_n_messages`. (`>=` is exactly equivalent to "type=1 positioned after the last type=2" given the canonical sort — a simpler way to honor the same ordering; chosen over an explicit position-based form per advisor preference.) Verified: 3996 now yields `chosen=1` (`100071283`, `n_messages=1`, `waiting_time=28`); 756 stays no-chosen (true opener); flag=1 sets unchanged; checker validates all three True. **Takes effect only on the next full re-run** (current `df_choicesets_23_06_2026.csv` still reflects the old `>` behaviour).
    - **Problem 2 — the tie-break *ordering* is wrong ~60% of the time — OPEN.** The `event_type desc` rule *assumes* the agent reply preceded the visitor message on a tie. Full-data check: at the **12,003** tie points (0.40% of all agent replies), `start_time` **and** raw file order agree the **visitor message actually came first in ~60%** of cases. The correct fix is to break `end_time` ties by **true chronology** (`start_time` / file order) instead of `event_type`, in **Stage 1's canonical sort** — which also drives agent-message merging (3996's two replies would then merge into one well-formed choice moment). Cross-stage change, deferred pending advisor consultation. NOTE: with Problem 1 fixed but Problem 2 open, Stage 3 now faithfully reproduces a tie-break that is itself backwards ~60% of the time — i.e. **consistent, not yet correct**. The checker's `validate_n_messages` was aligned to the same `>=` rule, so it agrees with Stage 3 on tie cases.
 8. **No-chosen choice sets — full breakdown.** After the `>=` tie fix (#7), the current table (`df_choicesets_28_06_2026.csv`) has **2,260** visible no-chosen sets (down from ~3,197 before the fix). Full trace of all 2,260 — every one is the agent acting with **no waiting customer turn to choose**, except one real gap:
+
    - **696 — proactive opener, reply == chat_start** (chosen session excluded from its own concurrent list at Stage 2; the reply *is* the session's first event). Genuine; not resolvable by a lower-bound tweak (verified 0 flip).
    - **1,181 — proactive opener, no events at all before the choice moment** (chosen alt present in exploded, skipped at Stage 3 for no pending type=1). Genuine.
    - **316 — `flag=1` re-engagement with no type=1 ever in the session** (Option 3 cannot reconstruct a turn without a visitor message). Genuine edge.
@@ -316,9 +367,10 @@ Segmented sampling via `choose_choicets` / `segment_choice`, now seeded (`--seed
    - So **2,199 of 2,260 are correct behavior** (proactive openers / re-engagements — open *policy* question whether Stage 2 should emit a choice set at all for an agent reply that answers no waiting customer), and only the 61 were a coverage bug (53 now addressed).
 9. **Singleton choice sets — 65.4% of the output — OPEN (policy).** Surfaced by the rewritten checker's structural pass on `df_choicesets_17_07_2026.csv`: **1,225,607 of 1,872,830** sets contain exactly **one** alternative (mean alternatives/set = **1.40**). Not a bug — Stage 2 only emits choice moments with >1 concurrent session, and Stage 3 then skips every alternative with no pending visitor turn, so these are sets where all competitors had already been answered. But a one-alternative set contributes **zero information to a conditional logit** (its likelihood contribution is identically 1). Decide whether to drop them before estimation and, more importantly, whether they indicate the concurrency window is too generous (a session counts as "competing" from assignment to `chat_end` even while it has nothing pending). Related to the open policy question in #8.
 10. **Unresolved `id_rep = 1` placeholder — 3,567 sets (0.2%) — OPEN (minor).** Stage 1's `rep_fix` propagates the first real `id_rep` back over the pre-assignment placeholder `1` per `(id_session, subsession)`; when a subsession contains **no** real agent id at all, the placeholder survives into the choice-set table. This is most of the 4,169 sets where `id_rep` varies *within* a set (the rest are transferred sessions, which appear in `merged_session.csv` under more than one agent). Harmless for estimation as long as `id_rep` is not used as a fixed effect on the choice-set table — Stage 2's concurrency uses the *session metadata* `id_rep`, not the event row's — but worth a fallback in `rep_fix` (e.g. propagate across subsessions) if agent-level covariates are ever added.
-11. **`flag = 1` sets mechanically determine both new covariates — OPEN (decide before estimating).** On the Stage 4 table, `flag = 1` sets are **13.6%** of all sets, and on them:
-    - **`stickiness` on the chosen row is 0 by construction.** `flag = 1` *means* the agent's previous type-2 was to a different session (that is the definition in `agent_unification.py`), so the re-engaged session can never be the sticky alternative. Measured: **0.0%** stay rate on `flag = 1` sets vs **41.5%** on `flag = 0`.
-    - **`FCFS` on the chosen row is near-deterministic: 90.5%** (vs **44.7%** on `flag = 0`). A re-engaged session has usually sat untouched longer than the competitors' pending messages have waited, so the Option-3 clock makes it the longest-waiting alternative almost every time. (Not an artifact of the `waiting_time` basis — the `end_time` basis gives 91.6% on the same sets.)
+11. **`flag = 1` sets mechanically determine both new covariates — OPEN (decide before estimating).** On the Stage 4 table, `flag = 1` sets are **12.9%** of all sets, and on them:
+
+    - **`stickiness` on the chosen row is 0 by construction.** `flag = 1` *means* the agent's previous type-2 was to a different session (that is the definition in `agent_unification.py`), so the re-engaged session can never be the sticky alternative. Measured: **0.0%** stay rate on `flag = 1` sets vs **41.2%** on `flag = 0`.
+    - **`FCFS` on the chosen row is near-deterministic: 90.5%** (vs **45.2%** on `flag = 0`). A re-engaged session has usually sat untouched longer than the competitors' pending messages have waited, so the Option-3 clock makes it the longest-waiting alternative almost every time. (Not an artifact of the `waiting_time` basis — the `end_time` basis gives 93.7% on the same sets.)
 
     Pooled, these sets push the `FCFS` coefficient up and the `stickiness` coefficient down for reasons that are definitional, not behavioural. Either estimate on `flag == 0` and report `flag == 1` separately, or interact both covariates with `flag`.
 

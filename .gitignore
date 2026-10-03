@@ -4,6 +4,9 @@
 *.ipynb
 *.log
 
+# Virtual Enviorments:
+.venv/
+
 # Stage 3 logger output (can be multi-GB)
 big_code_*.txt
 

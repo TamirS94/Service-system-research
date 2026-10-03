@@ -70,12 +70,35 @@ What it does
    `number_words`, which is Stage 3's SUM over the pending turn, so every row ends
    up at most 200. The untouched total is kept as `number_words_raw`.
 
-7. **`sentiment_type_turn`** - `sentiment_type` for the whole pending turn. Stage 3
+7. **`sentiment` truncation** - a turn with a summed `sentiment` outside
+   [`-sentiment-cap`, `+sentiment-cap`] (default **-3 .. +3**) is pulled to the
+   bound (winsorizing - no row is dropped). The cap is on the row's `sentiment`,
+   which is Stage 3's SUM over the pending turn, so the cap is a property of the
+   turn, not of the individual messages inside it. The bound is hardcoded rather
+   than re-estimated per run so coefficients stay comparable across runs, and it
+   is justified by the distribution, not by fit (CLAUDE.md Known Issue #14):
+   on `df_reg_ready_03_10_2026.csv` -3 / +3 are exactly the 1st / 99th
+   percentile of the row-level `sentiment` (raw range -34 .. +16; 13,240 rows =
+   0.97% affected). The step prints the empirical percentiles so a drift away
+   from +-3 is visible. The untouched value is kept as `sentiment_raw`.
+
+8. **`sentiment_type_turn`** - `sentiment_type` for the whole pending turn. Stage 3
    sums `sentiment` over the turn but keeps the *first* message's
    `sentiment_type`, so on multi-message turns the two disagree. Per message the
    type is exactly the sign of `sentiment`, so the turn's type is the sign of the
    summed `sentiment`, in the same codes (1 positive, 2 negative, 3 neutral). The
    original `sentiment_type` column is left as it is.
+
+9. **`sentiment_positive` / `sentiment_negative` / `sentiment_neutral`** - the same
+   three categories as 0/1 dummies, one per sign of the turn's summed `sentiment`
+   (`> 0`, `< 0`, `== 0`). Mutually exclusive and exhaustive, so exactly one is 1
+   on every row and the three sum to 1 - which means **only two of them can enter
+   a clogit** (the third is the reference category; all three together are
+   perfectly collinear). Identical information to `sentiment_type_turn`, just in
+   the form a regression formula wants. Built from the capped `sentiment`, but the
+   cap never crosses zero so the raw column gives the same split. Nothing is
+   replaced: `sentiment`, `sentiment_raw`, `sentiment_type` and
+   `sentiment_type_turn` all stay.
 
 Inputs (all read from the repo root, like every other stage)
 ------------------------------------------------------------
@@ -90,6 +113,7 @@ Usage
     python src/stage_4_analysis_prep.py --out df_reg_20_08_2026.csv
     python src/stage_4_analysis_prep.py --drop-no-chosen        # strata with no chosen row
     python src/stage_4_analysis_prep.py --fcfs-basis end_time
+    python src/stage_4_analysis_prep.py --words-cap 200 --sentiment-cap 3
 """
 
 import argparse
@@ -117,6 +141,7 @@ DEFAULT_EVENTS = "df_1_not_merged_2_merged.csv"  # Stage 1 output = the event st
 DEFAULT_EXPLODED = "df_exploded_all_data.csv"  # Stage 2 output = choice moments
 SHIFT_GAP_SEC = 3600  # a gap this long in an agent's replies ends a shift
 WORDS_CAP = 200  # a turn with more words than this counts as this many
+SENTIMENT_CAP = 3  # a turn's summed sentiment is clipped to [-this, +this]
 
 
 def log(msg=""):
@@ -539,7 +564,55 @@ def truncate_number_words(df: pd.DataFrame, cap: int = WORDS_CAP) -> pd.DataFram
 
 
 # ------------------------------------------------------------------
-# 9. sentiment_type over the whole turn
+# 9. sentiment truncation (turn-wise)
+# ------------------------------------------------------------------
+def truncate_sentiment(df: pd.DataFrame, cap: int = SENTIMENT_CAP) -> pd.DataFrame:
+    """Clip the TURN's summed sentiment to [-cap, +cap]; keep the raw value.
+
+    `sentiment` on a choice-set row is Stage 3's SUM over the whole pending turn,
+    and the cap applies to that turn total (not to each message separately): a
+    turn summing to -11 becomes -cap, it is NOT capped per message and re-summed.
+    Winsorizing, not trimming - no row is dropped, only the value is pulled to
+    the bound.
+
+    `cap` is hardcoded (default +-3) instead of re-estimated from each run's P1 /
+    P99, so the covariate means the same thing across runs. +-3 happens to be
+    exactly the 1st / 99th percentile of the current table, and the empirical
+    percentiles are logged so a drift is visible.
+
+    `sentiment_type_turn` is the SIGN of this column and clipping never crosses
+    zero, so that column is identical whether it is built before or after this
+    step.
+    """
+    df["sentiment_raw"] = df["sentiment"]
+    df["sentiment"] = df["sentiment"].clip(lower=-cap, upper=cap)
+
+    raw = df["sentiment_raw"]
+    n_lo = int((raw < -cap).sum())
+    n_hi = int((raw > cap).sum())
+    n_hit = n_lo + n_hi
+    p01, p99 = raw.quantile(0.01), raw.quantile(0.99)
+    log(f"   cap: turn-summed sentiment clipped to [{-cap}, {cap}]")
+    log(
+        f"   rows truncated: {n_hit:,} ({100 * n_hit / max(len(df), 1):.3f}%) - "
+        f"{n_lo:,} below {-cap}, {n_hi:,} above {cap}"
+    )
+    log(
+        f"   range {int(raw.min())} .. {int(raw.max())} -> "
+        f"{int(df['sentiment'].min())} .. {int(df['sentiment'].max())}; "
+        f"mean {raw.mean():.4f} -> {df['sentiment'].mean():.4f}, "
+        f"sd {raw.std():.4f} -> {df['sentiment'].std():.4f}"
+    )
+    log(
+        f"   empirical P1 / P99 of the raw column: {p01:.1f} / {p99:.1f} "
+        f"(expected {-cap} / {cap} - the cap is hardcoded, so a mismatch here is "
+        f"information, not an error)"
+    )
+    return df
+
+
+# ------------------------------------------------------------------
+# 10. sentiment_type over the whole turn
 # ------------------------------------------------------------------
 def add_sentiment_type_turn(df: pd.DataFrame) -> pd.DataFrame:
     """sentiment_type recomputed for the whole pending turn.
@@ -565,6 +638,56 @@ def add_sentiment_type_turn(df: pd.DataFrame) -> pd.DataFrame:
         f"{int(differs.sum()):,} ({100 * differs.mean():.1f}%), "
         f"all multi-message: {bool((~differs | multi).all())}"
     )
+    return df
+
+
+# ------------------------------------------------------------------
+# 11. sentiment sign dummies
+# ------------------------------------------------------------------
+def add_sentiment_dummies(df: pd.DataFrame) -> pd.DataFrame:
+    """0/1 dummies for the sign of the turn's summed `sentiment`.
+
+    `sentiment_positive` = 1 where sentiment > 0, `sentiment_negative` = 1 where
+    sentiment < 0, `sentiment_neutral` = 1 where sentiment == 0; each is 0 on the
+    other two groups. Mutually exclusive and exhaustive, so exactly one is 1 per
+    row and they sum to 1 - hence **only two may enter a clogit**, the third being
+    the reference category (all three together are perfectly collinear).
+
+    Same information as `sentiment_type_turn` (1/2/3), in dummy form. Built from
+    the capped `sentiment`; the cap never crosses zero, so `sentiment_raw` gives
+    the identical split. No existing column is touched.
+    """
+    s = df["sentiment"]
+    df["sentiment_positive"] = (s > 0).astype("int8")
+    df["sentiment_negative"] = (s < 0).astype("int8")
+    df["sentiment_neutral"] = (s == 0).astype("int8")
+
+    n = max(len(df), 1)
+    pos, neg, neu = (
+        int(df["sentiment_positive"].sum()),
+        int(df["sentiment_negative"].sum()),
+        int(df["sentiment_neutral"].sum()),
+    )
+    log(
+        f"   sentiment_positive {pos:,} ({100 * pos / n:.1f}%), "
+        f"sentiment_negative {neg:,} ({100 * neg / n:.1f}%), "
+        f"sentiment_neutral {neu:,} ({100 * neu / n:.1f}%)"
+    )
+    total = df["sentiment_positive"] + df["sentiment_negative"] + df["sentiment_neutral"]
+    log(f"   exactly one dummy per row: {bool((total == 1).all())}")
+    # same split as sentiment_type_turn (1 pos / 2 neg / 3 neutral) and sign-stable
+    # under the +-3 cap
+    agrees = (
+        (df["sentiment_positive"] == (df["sentiment_type_turn"] == 1))
+        & (df["sentiment_negative"] == (df["sentiment_type_turn"] == 2))
+        & (df["sentiment_neutral"] == (df["sentiment_type_turn"] == 3))
+    ).all()
+    raw_same = (np.sign(df["sentiment_raw"]) == np.sign(df["sentiment"])).all()
+    log(
+        f"   matches sentiment_type_turn: {bool(agrees)}; "
+        f"same split on the uncapped sentiment_raw: {bool(raw_same)}"
+    )
+    log("   [INFO] collinear by construction - enter only two, e.g. drop sentiment_neutral")
     return df
 
 
@@ -672,6 +795,12 @@ def main():
         help=f"cap a turn's number_words at this value (default {WORDS_CAP})",
     )
     ap.add_argument(
+        "--sentiment-cap",
+        type=int,
+        default=SENTIMENT_CAP,
+        help=f"clip a turn's summed sentiment to [-N, +N] (default {SENTIMENT_CAP})",
+    )
+    ap.add_argument(
         "--nrows",
         type=int,
         default=None,
@@ -694,18 +823,18 @@ def main():
     log(f"exploded    : {args.exploded}")
     log(f"output      : {out_path}\n")
 
-    log("[1/11] loading the choice-set table...")
+    log("[1/13] loading the choice-set table...")
     df = pd.read_csv(cs_path, nrows=args.nrows)
     df.columns = df.columns.str.strip()
     log(f"   {len(df):,} rows x {df.shape[1]} cols  ({time.time() - t0:.0f}s)")
 
-    log("\n[2/11] dropping single-alternative choice sets...")
+    log("\n[2/13] dropping single-alternative choice sets...")
     df = filter_multi_alternative(df)
 
     # Outliers go BEFORE anything set-dependent (set_size, FCFS): a partial removal
     # can take out a set's FCFS row or shrink it to one alternative. P99 is still
     # taken over the size-filtered table, as before.
-    log("\n[3/11] remove waiting time outliers...")
+    log("\n[3/13] remove waiting time outliers...")
     df = remove_waiting_time_outliers(df)
     log("   re-applying the size filter (partial removals can leave a singleton)...")
     df = filter_multi_alternative(df)
@@ -722,10 +851,10 @@ def main():
             f"anyway; use --drop-no-chosen to remove them here"
         )
 
-    log("\n[4/11] FCFS (first come, first served)...")
+    log("\n[4/13] FCFS (first come, first served)...")
     df = add_fcfs(df, args.fcfs_basis)
 
-    log("\n[5/11] loading the event stream + stickiness...")
+    log("\n[5/13] loading the event stream + stickiness...")
     events = pd.read_csv(
         args.events,
         usecols=[
@@ -739,25 +868,31 @@ def main():
     log(f"   {len(events):,} events")
     df = add_stickiness(df, events, args.exploded)
 
-    log("\n[6/11] session_progress_left_customers (customer messages left)...")
+    log("\n[6/13] session_progress_left_customers (customer messages left)...")
     df = add_session_progress(df, events)
 
-    log("\n[7/11] session_progress_left_all_msg (all messages left: customer + agent)...")
+    log("\n[7/13] session_progress_left_all_msg (all messages left: customer + agent)...")
     df = add_session_msgs_left(df, events)
 
     log(
-        "\n[8/11] session history at T (n_prior_agent_replies, time_since_agent_last_replied)..."
+        "\n[8/13] session history at T (n_prior_agent_replies, time_since_agent_last_replied)..."
     )
     df = add_session_history(df, events)
 
-    log("\n[9/11] time of day...")
+    log("\n[9/13] time of day...")
     df = add_time_of_day(df)
 
-    log(f"\n[10/11] truncating number_words at {args.words_cap}...")
+    log(f"\n[10/13] truncating number_words at {args.words_cap}...")
     df = truncate_number_words(df, args.words_cap)
 
-    log("\n[11/11] sentiment_type over the whole turn...")
+    log(f"\n[11/13] truncating sentiment at +-{args.sentiment_cap}...")
+    df = truncate_sentiment(df, args.sentiment_cap)
+
+    log("\n[12/13] sentiment_type over the whole turn...")
     df = add_sentiment_type_turn(df)
+
+    log("\n[13/13] sentiment sign dummies...")
+    df = add_sentiment_dummies(df)
 
     log(f"\nwriting {out_path} ...")
     df.to_csv(out_path, index=False)
@@ -770,8 +905,11 @@ def main():
     log("      FCFS, fcfs_rank, stickiness, stickiness_streak, n_prior_agent_replies,")
     log("      time_since_agent_last_replied, session_progress_left_customers, session_progress_total_customers,")
     log("      session_progress_pct_customers, session_progress_left_all_msg, session_progress_total_all_msg,")
-    log("      session_progress_pct_all_msg, sentiment_type_turn")
+    log("      session_progress_pct_all_msg, sentiment_type_turn,")
+    log("      sentiment_positive, sentiment_negative, sentiment_neutral")
+    log("      (the 3 dummies are collinear - enter only two, the third is the reference)")
     log("  truncated: number_words (original kept as number_words_raw)")
+    log("             sentiment    (original kept as sentiment_raw)")
     log(
         "  set-level - CONSTANT within a stratum, so interactions / sample splits only:"
     )

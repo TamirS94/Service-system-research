@@ -167,13 +167,14 @@ conditional logit is estimated on. Run from the repo root:
 python src/stage_4_analysis_prep.py                              # newest df_choicesets_*.csv
 python src/stage_4_analysis_prep.py --choicesets df_choicesets_17_08_2026.csv
 python src/stage_4_analysis_prep.py --drop-no-chosen --fcfs-basis end_time
-python src/stage_4_analysis_prep.py --words-cap 200
+python src/stage_4_analysis_prep.py --words-cap 200 --sentiment-cap 3
 ```
 
-Listed in **execution order** (the order the `[n/11]` steps print). Numbers are from
-`df_choicesets_17_08_2026.csv` → `df_reg_ready_26_09_2026.csv` (the current output: 55
-columns, new progress-column names, turn-wise word cap; it was produced as `…_v2.csv` and
-renamed, replacing the pre-fix version).
+Listed in **execution order** (the order the `[n/13]` steps print). Numbers are from
+`df_choicesets_17_08_2026.csv` → `df_reg_ready_03_10_2026_v2.csv` (the current output: 56
+columns — the previous 55 plus `sentiment_raw` from the new sentiment cap; verified against
+`df_reg_ready_03_10_2026.csv`: `sentiment` is the only column that changed, nothing else
+moved).
 
 **Convention — transforms apply to the turn.** A choice-set row is one pending *turn*, so any
 cap / truncation / recode of a covariate (לקטום etc.) applies to the **row value**, not to the
@@ -277,7 +278,23 @@ on **all** 1,372,356 rows.
    *History:* the first version capped each **message** at 200 and re-summed the turn, which
    left 1,052 rows above 200 (max 1,372). That misread the intended rule; it was replaced by
    the turn-wise cap and the `--words-cap-basis` option was removed.
-10. **`sentiment_type_turn`** — `sentiment_type` for the **whole pending turn**, in the
+10. **`sentiment` truncation — turn-wise** — a **turn** whose summed `sentiment` falls outside
+    `--sentiment-cap` (default **±3**) is pulled to the bound (winsorized — **no row is
+    dropped**). As with `number_words`, the cap is on the **row** value, i.e. Stage 3's SUM over
+    the pending turn: a turn summing to −11 becomes −3, it is *not* capped per message and
+    re-summed (that per-message variant is a different covariate — see Known Issue #14).
+    The untouched value is kept as **`sentiment_raw`**.
+    *Justification (distribution, not fit — the rule in #14):* on the Stage 4 table −3 and +3
+    are **exactly** the 1st and 99th percentile of the row-level `sentiment` (raw range
+    −34..+16, 71% zeros). 13,240 rows = **0.965%** are capped (8,035 below −3, 5,205 above +3);
+    mean 0.0839 → 0.0917, sd 0.9069 → 0.7952. The bound is **hardcoded**, not re-estimated per
+    run, so the covariate means the same thing across runs; the step logs the empirical P1/P99
+    so a drift away from ±3 is visible.
+    *No side effects:* `sentiment_type_turn` is the **sign** of this column and clipping never
+    crosses zero, so it is identical either way (verified); no other Stage 4 step reads
+    `sentiment`, and the checker re-sums `sentiment` against the **Stage 3** table, so it is
+    unaffected.
+11. **`sentiment_type_turn`** — `sentiment_type` for the **whole pending turn**, in the
     provider's codes (Dictionary 6: 1 positive, 2 negative, 3 neutral). Needed because Stage 3
     keeps the first message's `sentiment_type` but sums `sentiment` (see Stage 3). Per customer
     message, `sentiment_type` is **exactly the sign of `sentiment`** (verified on all 1.95M
@@ -294,13 +311,27 @@ on **all** 1,372,356 rows.
     negative/positive dummies. The coding for the main model is still to be agreed with the
     advisor — see Known Issue #14 for the numbers and the suggested way to avoid a
     specification search.
+12. **`sentiment_positive` / `sentiment_negative` / `sentiment_neutral`** — the same three
+    categories as **0/1 dummies**, one per sign of the turn's summed `sentiment` (`> 0`, `< 0`,
+    `== 0`): 255,809 / 139,934 / 976,613 rows (18.6% / 10.2% / 71.2%). Mutually exclusive and
+    exhaustive — exactly one is 1 on every row and the three sum to 1 — so **only two may
+    enter a clogit**; the third is the reference category and all three together are perfectly
+    collinear (the step logs this as an `[INFO]`). Identical information to
+    `sentiment_type_turn`, in the form a regression formula wants, which makes these the
+    "dummies neg / pos" row of the table in Known Issue #14 (LL +1,013; with neutral as the
+    reference, drop `sentiment_neutral`). Built from the capped `sentiment`; the ±3 cap never
+    crosses zero, so `sentiment_raw` gives the identical split (verified in the step's log).
+    Nothing is replaced — `sentiment`, `sentiment_raw`, `sentiment_type` and
+    `sentiment_type_turn` all stay.
 
 **Which columns can be main effects.** clogit conditions on the stratum, so anything constant
 within a choice set drops out of the likelihood. Alternative-varying (usable): `FCFS`,
 `fcfs_rank`, `stickiness`, `stickiness_streak`, `n_prior_agent_replies`,
 `time_since_agent_last_replied`, `session_progress_left_customers`, `session_progress_total_customers`,
 `session_progress_pct_customers`, `session_progress_left_all_msg`, `session_progress_total_all_msg`, `session_progress_pct_all_msg`,
-`sentiment_type_turn` (categorical — enter as dummies, neutral = 3 as reference).
+`sentiment_type_turn` (categorical — enter as dummies, neutral = 3 as reference), and its
+ready-made dummy form `sentiment_positive` / `sentiment_negative` / `sentiment_neutral` (enter
+**two of the three** — the third is the reference).
 Set-level — interactions or sample splits **only**: `set_size`,
 `prev_reply_gap`, `shift_id`, `time_in_shift`, `hour`, `day_band`, `is_night`, `dow`, and the
 pre-existing `workload`, `flag`, `chosen_time`, `id_rep`. Note `corr(workload, set_size) = 0.057` — open sessions and *waiting* sessions are nearly unrelated, so `workload` is not a
@@ -444,6 +475,12 @@ Segmented sampling via `choose_choicets` / `segment_choice`, now seeded (`--seed
     (not random rows — the full data has already been looked at); **cluster standard errors
     by `id_rep`** in every model (choices by the same agent are not independent, so plain
     clogit SEs are too small). Write the decision down here before the main estimation.
+    **Decided (2026-10-03) — the cap only:** Stage 4 now winsorizes `sentiment` to **±3**
+    (step 10 above; raw kept as `sentiment_raw`), justified by the distribution — ±3 is exactly
+    the 1st/99th percentile, 0.965% of rows — and **not** by fit, since the table above shows
+    capping is near-irrelevant to the fit. This settles the *range* of the column, **not** its
+    **coding**: linear vs. `sentiment_type_turn` dummies vs. the 6-bin version is still open
+    with the advisor, and the capped column changes none of those numbers materially.
 
 ---
 

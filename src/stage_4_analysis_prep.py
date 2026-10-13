@@ -100,11 +100,29 @@ What it does
    replaced: `sentiment`, `sentiment_raw`, `sentiment_type` and
    `sentiment_type_turn` all stay.
 
+10. **`first_msg_*`** - covariates of each alternative's session taken at its
+    **first customer message**: words / chars / lines / typing duration,
+    sentiment (+ type and sign dummies; same caps as the turn columns, raw kept
+    as `*_raw`) and its clock (`first_msg_hour`, `_day_band`, `_is_night`,
+    `_dow`), plus `session_age` (T - first message) and `session_arrival_rank`
+    (FCFS by session arrival). Constant per session but different across the
+    sessions of a set, so - unlike the choice-moment clock - usable as main
+    effects.
+
+11. **`session_*` metadata** - fields of `merged_session.csv` fixed at assignment:
+    `session_queue_time`, `session_first_conv` / `session_is_first_conv`,
+    `session_origin`, `session_engagement_skill`, `session_id_initiator` /
+    `session_initiator_type`, and `session_workload_at_assignment` (Stage 2's
+    concurrency mask evaluated at the session's own `queue_exit_time`). Joined
+    on (session, the choice set's agent), so a transferred session gets the
+    subsession of the agent making this choice. Look-ahead fields are left out.
+
 Inputs (all read from the repo root, like every other stage)
 ------------------------------------------------------------
     df_choicesets_<date>.csv       Stage 3 output (newest by default)
-    df_exploded_all_data.csv       Stage 2 - maps choice_set -> the reply event_id
+    df_exploded_all_data.csv       Stage 2 - maps choice_set -> the reply event_id / agent
     df_1_not_merged_2_merged.csv   Stage 1 - the event stream (lag + session length)
+    merged_session.csv             session metadata (queue time, first_conv, ...)
 
 Usage
 -----
@@ -139,6 +157,7 @@ os.chdir(
 
 DEFAULT_EVENTS = "df_1_not_merged_2_merged.csv"  # Stage 1 output = the event stream
 DEFAULT_EXPLODED = "df_exploded_all_data.csv"  # Stage 2 output = choice moments
+DEFAULT_SESSIONS = "merged_session.csv"  # session metadata (Stage 2 input)
 SHIFT_GAP_SEC = 3600  # a gap this long in an agent's replies ends a shift
 WORDS_CAP = 200  # a turn with more words than this counts as this many
 SENTIMENT_CAP = 3  # a turn's summed sentiment is clipped to [-this, +this]
@@ -379,6 +398,23 @@ def add_session_history(df: pd.DataFrame, events: pd.DataFrame) -> pd.DataFrame:
 # ------------------------------------------------------------------
 # 6. time of day (set-level)
 # ------------------------------------------------------------------
+def clock_columns(t: pd.Series) -> dict:
+    """hour / day_band / is_night / dow of an epoch-seconds column (0 = Monday).
+    Shared by the choice-moment clock (#6) and the first-message clock (#12)."""
+    hour = (t // 3600) % 24
+    day_band = pd.cut(
+        hour,
+        bins=[-1, 5, 11, 17, 23],
+        labels=["night", "morning", "afternoon", "evening"],
+    ).astype("str")
+    return {
+        "hour": hour.astype("int8"),
+        "day_band": day_band,
+        "is_night": hour.isin([22, 23, 0, 1, 2, 3, 4, 5]).astype("int8"),
+        "dow": (((t // 86400) + 4) % 7).astype("int8"),
+    }
+
+
 def add_time_of_day(df: pd.DataFrame) -> pd.DataFrame:
     """Clock context of the choice moment. Constant within a stratum, so these
     are for interactions and sample splits only - never a clogit main effect.
@@ -388,15 +424,8 @@ def add_time_of_day(df: pd.DataFrame) -> pd.DataFrame:
     wall clock is the contact centre's local time is a question for the data
     provider - it decides what "night" means here.
     """
-    hour = (df["chosen_time"] // 3600) % 24
-    df["hour"] = hour.astype("int8")
-    df["day_band"] = pd.cut(
-        hour,
-        bins=[-1, 5, 11, 17, 23],
-        labels=["night", "morning", "afternoon", "evening"],
-    ).astype("str")
-    df["is_night"] = hour.isin([22, 23, 0, 1, 2, 3, 4, 5]).astype("int8")
-    df["dow"] = (((df["chosen_time"] // 86400) + 4) % 7).astype("int8")  # 0 = Monday
+    for name, col in clock_columns(df["chosen_time"]).items():
+        df[name] = col
 
     sets = df[df["chosen"] == 1]
     log(
@@ -691,6 +720,288 @@ def add_sentiment_dummies(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+# ------------------------------------------------------------------
+# 12. the session's first customer message (alternative-varying)
+# ------------------------------------------------------------------
+def add_first_message(
+    df: pd.DataFrame,
+    events: pd.DataFrame,
+    words_cap: int = WORDS_CAP,
+    sentiment_cap: int = SENTIMENT_CAP,
+) -> pd.DataFrame:
+    """Covariates of each alternative's session, taken at its FIRST customer message.
+
+    Constant within a session but different across the sessions of a choice set,
+    so - unlike the choice-moment clock (#6) - they can be clogit main effects.
+    No look-ahead: every alternative has a pending (or, for Option 3, an earlier)
+    customer turn before T, so the session's first customer message precedes T.
+
+    The first message is the session's first type-1 in the Stage 1 event stream,
+    ordered (`end_time`, `event_id`) exactly as in `session_progress_*_customers`.
+    Its `end_time` is the agent-visible moment: Stage 1's type-7 fix moved it to
+    the queue exit (median gap to `queue_exit_time` = 0 s), so the clock columns
+    and `session_age` are on the same clock as `waiting_time` and Stage 2's
+    concurrency lower bound.
+
+    `first_msg_number_words` / `first_msg_sentiment` get the same caps as the turn
+    columns (raw kept as `*_raw`), and `first_msg_sentiment_*` the same sign
+    dummies - enter two of the three. `session_arrival_rank` is FCFS by session
+    arrival (1 = the session that reached the agent first), whereas `fcfs_rank`
+    ranks the pending turns.
+    """
+    ev1 = events.loc[
+        events["event_type"] == 1,
+        [
+            "id_session",
+            "end_time",
+            "event_id",
+            "number_words",
+            "number_chars",
+            "number_lines",
+            "duration",
+            "sentiment",
+            "sentiment_type",
+        ],
+    ]
+    first = (
+        ev1.sort_values(["id_session", "end_time", "event_id"], kind="mergesort")
+        .drop_duplicates("id_session")
+        .set_index("id_session")
+    )
+
+    sess = df["id_session"]
+    unmatched = int((~sess.isin(first.index)).sum())
+    if unmatched:
+        log(f"   [WARN] {unmatched:,} rows whose session has no customer message in the events")
+
+    t_first = sess.map(first["end_time"])
+    df["first_msg_event_id"] = sess.map(first["event_id"]).astype("Int64")
+    df["first_msg_time"] = t_first.astype("Int64")
+
+    words = sess.map(first["number_words"])
+    df["first_msg_number_words_raw"] = words.astype("Int32")
+    df["first_msg_number_words"] = words.clip(upper=words_cap).astype("Int32")
+    for c in ("number_chars", "number_lines", "duration"):
+        df[f"first_msg_{c}"] = sess.map(first[c]).astype("Int32")
+
+    sent = sess.map(first["sentiment"])
+    df["first_msg_sentiment_raw"] = sent.astype("Int32")
+    df["first_msg_sentiment"] = sent.clip(lower=-sentiment_cap, upper=sentiment_cap).astype("Int32")
+    df["first_msg_sentiment_type"] = sess.map(first["sentiment_type"]).astype("Int8")
+    df["first_msg_sentiment_positive"] = (sent > 0).astype("int8")
+    df["first_msg_sentiment_negative"] = (sent < 0).astype("int8")
+    df["first_msg_sentiment_neutral"] = (sent == 0).astype("int8")
+
+    for name, col in clock_columns(t_first).items():
+        df[f"first_msg_{name}"] = col
+
+    df["session_age"] = (df["chosen_time"] - t_first).astype("Int64")
+    df["session_arrival_rank"] = (
+        df.groupby("choice_set")["first_msg_time"].rank(method="dense").astype("Int32")
+    )
+
+    # --- checks ---------------------------------------------------------------
+    sessions = df.drop_duplicates("id_session")
+    log(f"   {len(sessions):,} distinct sessions across {len(df):,} rows")
+    log(
+        f"   first_msg_number_words: median {sessions['first_msg_number_words_raw'].median():.0f}, "
+        f"max {int(sessions['first_msg_number_words_raw'].max())} -> capped at {words_cap} on "
+        f"{int((df['first_msg_number_words_raw'] > words_cap).sum()):,} rows"
+    )
+    log(
+        f"   first_msg_duration == 0 on {100 * (sessions['first_msg_duration'] == 0).mean():.1f}% "
+        f"of sessions (typing time is often not recorded)"
+    )
+    n_cap = int(((sent < -sentiment_cap) | (sent > sentiment_cap)).sum())
+    log(
+        f"   first_msg_sentiment: P1 / P99 {sent.quantile(0.01):.0f} / {sent.quantile(0.99):.0f}, "
+        f"{n_cap:,} rows clipped to +-{sentiment_cap}; "
+        f"positive {100 * (sent > 0).mean():.1f}%, negative {100 * (sent < 0).mean():.1f}%, "
+        f"neutral {100 * (sent == 0).mean():.1f}%"
+    )
+    sign_code = pd.Series(np.select([sent > 0, sent < 0], [1, 2], default=3), index=df.index)
+    log(
+        f"   first_msg_sentiment_type == sign of first_msg_sentiment: "
+        f"{bool((sign_code == df['first_msg_sentiment_type']).all())}"
+    )
+    # The row's turn starts at or after the session's first message, and its
+    # waiting clock starts no earlier than that turn (later on Option-3 rows).
+    log(
+        f"   first message at or before the row's turn: "
+        f"{bool((t_first <= df['end_time']).all())}; "
+        f"session_age >= waiting_time: {bool((df['session_age'] >= df['waiting_time']).all())}"
+    )
+    log(
+        f"   rows whose turn IS the session's first message: "
+        f"{100 * (df['first_msg_event_id'] == df['event_id']).mean():.1f}%"
+    )
+    log(
+        f"   session_age (sec): median {df['session_age'].median():,.0f}, "
+        f"p90 {df['session_age'].quantile(0.9):,.0f}"
+    )
+    chosen = df["chosen"] == 1
+    first_in = (df["session_arrival_rank"] == 1).astype("int8")
+    chance = (1 / df.loc[chosen, "set_size"]).mean()
+    log(
+        f"   chosen rows that are the earliest-arrived session (rank 1): "
+        f"{100 * first_in[chosen].mean():.1f}% (chance ~{100 * chance:.1f}%); "
+        f"rank-1 rows that are also FCFS: {100 * df.loc[first_in == 1, 'FCFS'].mean():.1f}%"
+    )
+    return df
+
+
+# ------------------------------------------------------------------
+# 13. session metadata known at assignment (alternative-varying)
+# ------------------------------------------------------------------
+def add_session_metadata(
+    df: pd.DataFrame, sessions_path: str, exploded_path: str
+) -> pd.DataFrame:
+    """Session-level fields from `merged_session.csv` that are fixed when the
+    session is handed to the agent (no look-ahead), plus the agent's workload at
+    that moment.
+
+    Transferred sessions have one metadata row per agent (subsession), so a row is
+    joined on (`id_session`, the agent who made this choice) - that agent comes
+    from Stage 2's exploded table, the same id Stage 2 used for concurrency - and
+    falls back to the session's first subsession if the pair is not found.
+
+        session_queue_time       pre-assignment queue wait (sec)
+        session_first_conv       provider code: 1 = the visitor's first conversation
+                                 (verified: 99.8% of code-1 sessions have no earlier
+                                 session of the same id_visitor), 2 = returning
+        session_is_first_conv    the same as 0/1
+        session_origin           provider code 1/2/3 (undocumented - ask the provider)
+        session_engagement_skill provider code (98.8% are 1)
+        session_id_initiator     raw: 1 or an agent id
+        session_initiator_type   0 = initiator id 1 (system / customer?),
+                                 1 = this agent, 2 = another agent  (meaning to be
+                                 confirmed with the provider)
+        session_workload_at_assignment
+                                 other sessions this agent had open when this one
+                                 was assigned: Stage 2's mask
+                                 `queue_exit_time' < t <= chat_end_time'` evaluated
+                                 at t = this session's `queue_exit_time`
+
+    Known-abandonment sessions (`outcome == 4`) are dropped first, as in Stage 2.
+    Deliberately NOT carried: anything summarising the whole session or its end
+    (outcome, transfer_agent, NPS/CSAT, chat_sentiment, score, *_sent, total_*,
+    inner_wait, other_time, is_interactive) - all look-ahead. `first_sent` is
+    skipped too: it equals the first message's sentiment on only 54% of sessions.
+    """
+    meta_cols = [
+        "id_session",
+        "id_rep",
+        "subsession",
+        "outcome",
+        "queue_exit_time",
+        "chat_end_time",
+        "queue_time",
+        "first_conv",
+        "origin",
+        "engagement_skill",
+        "id_initiator",
+    ]
+    s = pd.read_csv(
+        sessions_path, skipinitialspace=True, usecols=lambda c: c.strip() in meta_cols
+    )
+    s.columns = s.columns.str.strip()
+    s = s[s["outcome"] != 4]
+    s = s.sort_values(["id_session", "subsession"], kind="mergesort").reset_index(drop=True)
+
+    # --- workload at assignment, per agent, with packed (agent, time) keys ------
+    SHIFT = np.int64(1) << 31  # epoch seconds (< 2^31) never collide with the code
+    base = pd.factorize(s["id_rep"])[0].astype("int64") * SHIFT
+    qe = s["queue_exit_time"].to_numpy("int64")
+    ce = s["chat_end_time"].to_numpy("int64")
+    bad_window = int((ce < qe).sum())
+    # A window with ce < qe never satisfies qe' < t <= ce', and neither does
+    # [qe, qe], so clipping keeps the count exact while making "closed before t"
+    # imply "assigned before t".
+    ce = np.maximum(ce, qe)
+    key_qe = np.sort(base + qe)
+    key_ce = np.sort(base + ce)
+    start_qe = np.searchsorted(key_qe, base, side="left")
+    start_ce = np.searchsorted(key_ce, base, side="left")
+    assigned_before = np.searchsorted(key_qe, base + qe, side="left") - start_qe
+    closed_before = np.searchsorted(key_ce, base + qe, side="left") - start_ce
+    s["workload_at_assignment"] = assigned_before - closed_before
+
+    ini = s["id_initiator"]
+    s["initiator_type"] = np.select([ini == 1, ini == s["id_rep"]], [0, 1], default=2)
+    s["is_first_conv"] = (s["first_conv"] == 1).astype("int8")
+
+    # --- join on (session, this choice set's agent) ---------------------------
+    expl = pd.read_csv(exploded_path, usecols=["index", "id_rep"])
+    expl = expl.drop_duplicates("index").set_index("index")["id_rep"]
+    set_rep = df["choice_set"].map(expl).fillna(-1).astype("int64").to_numpy()
+
+    first_pair = ~s.duplicated(["id_session", "id_rep"])
+    first_sess = ~s.duplicated("id_session")
+    rows_pair = np.flatnonzero(first_pair.to_numpy())
+    rows_sess = np.flatnonzero(first_sess.to_numpy())
+    p = pd.MultiIndex.from_frame(s.loc[first_pair, ["id_session", "id_rep"]]).get_indexer(
+        pd.MultiIndex.from_arrays([df["id_session"].to_numpy(), set_rep])
+    )
+    pos = np.where(p >= 0, rows_pair[p], -1)
+    fallback = pos < 0
+    q = pd.Index(s.loc[first_sess, "id_session"]).get_indexer(
+        df["id_session"].to_numpy()[fallback]
+    )
+    pos[fallback] = np.where(q >= 0, rows_sess[q], -1)
+    found = pos >= 0
+
+    def take(col: str, dtype: str) -> pd.Series:
+        vals = pd.Series(s[col].to_numpy()[np.maximum(pos, 0)], index=df.index)
+        return vals.where(found).astype(dtype)
+
+    df["session_queue_time"] = take("queue_time", "Int32")
+    df["session_first_conv"] = take("first_conv", "Int8")
+    df["session_is_first_conv"] = take("is_first_conv", "Int8")
+    df["session_origin"] = take("origin", "Int8")
+    df["session_engagement_skill"] = take("engagement_skill", "Int8")
+    df["session_id_initiator"] = take("id_initiator", "Int64")
+    df["session_initiator_type"] = take("initiator_type", "Int8")
+    df["session_workload_at_assignment"] = take("workload_at_assignment", "Int32")
+
+    # --- checks ---------------------------------------------------------------
+    n_fb = int((fallback & found).sum())
+    log(
+        f"   matched on (session, agent): {int((~fallback).sum()):,}; "
+        f"fallback to the first subsession: {n_fb:,}; unmatched: {int((~found).sum()):,}"
+    )
+    if bad_window:
+        log(f"   [INFO] {bad_window:,} metadata rows with chat_end < queue_exit (never open)")
+    sessions = df[found].drop_duplicates("id_session")
+    log(
+        f"   session_queue_time (sec): median {sessions['session_queue_time'].median():.0f}, "
+        f"p90 {sessions['session_queue_time'].quantile(0.9):.0f}"
+    )
+    log(
+        f"   session_is_first_conv: {100 * sessions['session_is_first_conv'].mean():.1f}% of sessions; "
+        f"session_origin: "
+        + ", ".join(
+            f"{k} {100 * v:.1f}%"
+            for k, v in sessions["session_origin"].value_counts(normalize=True).items()
+        )
+    )
+    log(
+        f"   session_initiator_type (0 id 1 / 1 this agent / 2 other agent): "
+        + ", ".join(
+            f"{k} {100 * v:.1f}%"
+            for k, v in sessions["session_initiator_type"]
+            .value_counts(normalize=True)
+            .sort_index()
+            .items()
+        )
+    )
+    w = df["session_workload_at_assignment"]
+    log(
+        f"   session_workload_at_assignment: mean {w.mean():.2f}, median {w.median():.0f}, "
+        f"p90 {w.quantile(0.9):.0f}  (vs workload at T: mean {df['workload'].mean():.2f})"
+    )
+    return df
+
+
 def remove_waiting_time_outliers(df: pd.DataFrame) -> pd.DataFrame:
     """
     Remove waiting_time outliers using a global 99th-percentile threshold.
@@ -778,6 +1089,9 @@ def main():
         "--exploded", default=DEFAULT_EXPLODED, help="Stage 2 exploded table"
     )
     ap.add_argument(
+        "--sessions", default=DEFAULT_SESSIONS, help="session metadata (merged_session.csv)"
+    )
+    ap.add_argument(
         "--out", default=None, help="output CSV (default: df_reg_ready_<today>.csv)"
     )
     ap.add_argument(
@@ -811,7 +1125,7 @@ def main():
     t0 = time.time()
     cs_path = args.choicesets or newest_choicesets()
     out_path = args.out or f"df_reg_ready_{datetime.today().strftime('%d_%m_%Y')}.csv"
-    for p in (cs_path, args.events, args.exploded):
+    for p in (cs_path, args.events, args.exploded, args.sessions):
         if not os.path.exists(p):
             sys.exit(f"Missing input: {p}")
 
@@ -821,20 +1135,21 @@ def main():
     log(f"choice sets : {cs_path}")
     log(f"events      : {args.events}")
     log(f"exploded    : {args.exploded}")
+    log(f"sessions    : {args.sessions}")
     log(f"output      : {out_path}\n")
 
-    log("[1/13] loading the choice-set table...")
+    log("[1/15] loading the choice-set table...")
     df = pd.read_csv(cs_path, nrows=args.nrows)
     df.columns = df.columns.str.strip()
     log(f"   {len(df):,} rows x {df.shape[1]} cols  ({time.time() - t0:.0f}s)")
 
-    log("\n[2/13] dropping single-alternative choice sets...")
+    log("\n[2/15] dropping single-alternative choice sets...")
     df = filter_multi_alternative(df)
 
     # Outliers go BEFORE anything set-dependent (set_size, FCFS): a partial removal
     # can take out a set's FCFS row or shrink it to one alternative. P99 is still
     # taken over the size-filtered table, as before.
-    log("\n[3/13] remove waiting time outliers...")
+    log("\n[3/15] remove waiting time outliers...")
     df = remove_waiting_time_outliers(df)
     log("   re-applying the size filter (partial removals can leave a singleton)...")
     df = filter_multi_alternative(df)
@@ -851,10 +1166,10 @@ def main():
             f"anyway; use --drop-no-chosen to remove them here"
         )
 
-    log("\n[4/13] FCFS (first come, first served)...")
+    log("\n[4/15] FCFS (first come, first served)...")
     df = add_fcfs(df, args.fcfs_basis)
 
-    log("\n[5/13] loading the event stream + stickiness...")
+    log("\n[5/15] loading the event stream + stickiness...")
     events = pd.read_csv(
         args.events,
         usecols=[
@@ -863,36 +1178,48 @@ def main():
             "id_rep",
             "event_type",
             "end_time",
+            "number_words",
+            "number_chars",
+            "number_lines",
+            "duration",
+            "sentiment",
+            "sentiment_type",
         ],
     )
     log(f"   {len(events):,} events")
     df = add_stickiness(df, events, args.exploded)
 
-    log("\n[6/13] session_progress_left_customers (customer messages left)...")
+    log("\n[6/15] session_progress_left_customers (customer messages left)...")
     df = add_session_progress(df, events)
 
-    log("\n[7/13] session_progress_left_all_msg (all messages left: customer + agent)...")
+    log("\n[7/15] session_progress_left_all_msg (all messages left: customer + agent)...")
     df = add_session_msgs_left(df, events)
 
     log(
-        "\n[8/13] session history at T (n_prior_agent_replies, time_since_agent_last_replied)..."
+        "\n[8/15] session history at T (n_prior_agent_replies, time_since_agent_last_replied)..."
     )
     df = add_session_history(df, events)
 
-    log("\n[9/13] time of day...")
+    log("\n[9/15] time of day...")
     df = add_time_of_day(df)
 
-    log(f"\n[10/13] truncating number_words at {args.words_cap}...")
+    log(f"\n[10/15] truncating number_words at {args.words_cap}...")
     df = truncate_number_words(df, args.words_cap)
 
-    log(f"\n[11/13] truncating sentiment at +-{args.sentiment_cap}...")
+    log(f"\n[11/15] truncating sentiment at +-{args.sentiment_cap}...")
     df = truncate_sentiment(df, args.sentiment_cap)
 
-    log("\n[12/13] sentiment_type over the whole turn...")
+    log("\n[12/15] sentiment_type over the whole turn...")
     df = add_sentiment_type_turn(df)
 
-    log("\n[13/13] sentiment sign dummies...")
+    log("\n[13/15] sentiment sign dummies...")
     df = add_sentiment_dummies(df)
+
+    log("\n[14/15] the session's first customer message...")
+    df = add_first_message(df, events, args.words_cap, args.sentiment_cap)
+
+    log("\n[15/15] session metadata known at assignment...")
+    df = add_session_metadata(df, args.sessions, args.exploded)
 
     log(f"\nwriting {out_path} ...")
     df.to_csv(out_path, index=False)
@@ -908,8 +1235,17 @@ def main():
     log("      session_progress_pct_all_msg, sentiment_type_turn,")
     log("      sentiment_positive, sentiment_negative, sentiment_neutral")
     log("      (the 3 dummies are collinear - enter only two, the third is the reference)")
+    log("    per session (first message / metadata - constant per session, varies in a set):")
+    log("      first_msg_number_words, first_msg_number_chars, first_msg_number_lines,")
+    log("      first_msg_duration, first_msg_sentiment, first_msg_sentiment_type,")
+    log("      first_msg_sentiment_positive/negative/neutral (enter two), first_msg_hour,")
+    log("      first_msg_day_band, first_msg_is_night, first_msg_dow, session_age,")
+    log("      session_arrival_rank, session_queue_time, session_is_first_conv,")
+    log("      session_origin, session_engagement_skill, session_initiator_type,")
+    log("      session_workload_at_assignment")
     log("  truncated: number_words (original kept as number_words_raw)")
     log("             sentiment    (original kept as sentiment_raw)")
+    log("             first_msg_number_words / first_msg_sentiment (originals kept as *_raw)")
     log(
         "  set-level - CONSTANT within a stratum, so interactions / sample splits only:"
     )

@@ -40,7 +40,7 @@ Raw input: `raw_events_17_06.csv` (event-level, clean column names + `silent_aba
 | 1     | `stage_1_cleaning_and_unification.py`          | `raw_events_17_06.csv`                                                                                         | `df_after_stage1_<date>.csv` (orchestrator: `df_1_not_merged_2_merged.csv`) |
 | 2     | `stage_2_concurrencies_and_explode.py`         | `df_1_not_merged_2_merged.csv`, `merged_session.csv`                                                         | `df_exploded_all_data.csv`, `before_third_stage_all_data.csv`               |
 | 3     | `stage_3_creating_choicesets_from_exploded.py` | `df_1_not_merged_2_merged.csv`, `df_exploded_all_data.csv`                                                   | `df_choicesets_<date>.csv`                                                    |
-| 4     | `stage_4_analysis_prep.py`                     | `df_choicesets_<date>.csv` (newest by default), `df_1_not_merged_2_merged.csv`, `df_exploded_all_data.csv` | `df_reg_ready_<date>.csv`                                                     |
+| 4     | `stage_4_analysis_prep.py`                     | `df_choicesets_<date>.csv` (newest by default), `df_1_not_merged_2_merged.csv`, `df_exploded_all_data.csv`, `merged_session.csv` | `df_reg_ready_<date>.csv`                                                     |
 | ✓    | `validation/official_checker_18_04.py`         | `df_choicesets_<date>.csv` (newest by default), `df_1_not_merged_2_merged.csv`, `df_exploded_all_data.csv` | validation report (stdout)                                                      |
 
 Stage 4 is **not** part of `run_pipeline.py` — it is a post-pipeline analysis-prep step, run by hand like the checker.
@@ -170,7 +170,8 @@ python src/stage_4_analysis_prep.py --drop-no-chosen --fcfs-basis end_time
 python src/stage_4_analysis_prep.py --words-cap 200 --sentiment-cap 3
 ```
 
-Listed in **execution order** (the order the `[n/13]` steps print). Numbers are from
+Listed in **execution order** (the order the `[n/15]` steps print; #13–#14 below are the
+current output `df_reg_ready_13_10_2026.csv`, 86 columns — see the end of #14). Numbers are from
 `df_choicesets_17_08_2026.csv` → `df_reg_ready_03_10_2026_v2.csv` (the current output: 56
 columns — the previous 55 plus `sentiment_raw` from the new sentiment cap; verified against
 `df_reg_ready_03_10_2026.csv`: `sentiment` is the only column that changed, nothing else
@@ -323,6 +324,61 @@ on **all** 1,372,356 rows.
     crosses zero, so `sentiment_raw` gives the identical split (verified in the step's log).
     Nothing is replaced — `sentiment`, `sentiment_raw`, `sentiment_type` and
     `sentiment_type_turn` all stay.
+13. **First-message session covariates (`first_msg_*`, `session_age`, `session_arrival_rank`)**
+    — added 2026-10-13. Every alternative's **session** described at its **first customer
+    message** (the session's first type-1 in the Stage 1 stream, ordered `end_time, event_id`
+    as in #5). Constant per session but different across the sessions of a set, so — unlike
+    the `T`-based clock of #8 — they **are usable as main effects**. No look-ahead: every
+    alternative has a customer turn before `T`, so the first message precedes `T`.
+    - `first_msg_number_words` (capped at `--words-cap`, raw in `first_msg_number_words_raw`;
+      median 14, 2,083 rows capped), `first_msg_number_chars`, `first_msg_number_lines`,
+      `first_msg_duration` (typing time — **0 on 84.9% of sessions**, i.e. mostly unrecorded;
+      weak covariate).
+    - `first_msg_sentiment` (clipped to `±--sentiment-cap` like the turn column, raw in
+      `first_msg_sentiment_raw`; 9,624 rows clipped), `first_msg_sentiment_type` (provider code,
+      = sign, verified) and dummies `first_msg_sentiment_positive/negative/neutral` (enter two).
+      Distribution differs a lot from turn sentiment: 13.7% negative, 3.2% positive, 83.1%
+      neutral — opening messages are mostly neutral problem statements.
+    - `first_msg_hour`, `first_msg_day_band`, `first_msg_is_night`, `first_msg_dow` — same
+      definitions as #8 (shared helper `clock_columns`), on `first_msg_time`.
+    - `first_msg_time` = the first message's `end_time`, i.e. the **agent-visible moment**
+      (Stage 1's type-7 fix moved it to the queue exit; median gap to `queue_exit_time` = 0 s),
+      the same clock as `waiting_time` and Stage 2's lower bound. `first_msg_event_id` links back.
+    - `session_age = T − first_msg_time` (median 970 s, p90 4,210 s). `session_age >=
+      waiting_time` on every row (verified). Correlated with `waiting_time` and
+      `n_prior_agent_replies` by construction — check collinearity before entering together.
+    - `session_arrival_rank` — dense rank of `first_msg_time` within the set (1 = the session
+      that reached the agent first): FCFS by **session** arrival, whereas `fcfs_rank` ranks the
+      **pending turns**. Chosen row is rank 1 in 55.4% of sets (chance ≈ 47.4%; turn-FCFS
+      compliance is 51.1%); only 51.6% of rank-1 rows are also `FCFS = 1`.
+    - **The metadata `first_sent` is not used**: it equals the first message's sentiment on only
+      54% of sessions, so its definition is unclear.
+14. **Session metadata known at assignment (`session_*`)** — added 2026-10-13, from
+    `merged_session.csv` (`--sessions`), `outcome == 4` dropped as in Stage 2. Joined on
+    (`id_session`, **the choice set's agent** from Stage 2's exploded `id_rep`), so a transferred
+    session takes the subsession of the agent making this choice (all 1,372,356 rows matched on
+    the pair; the first-subsession fallback was never needed). Hence these are constant per
+    (session, agent), not per session: 132 transferred sessions carry different values in
+    different agents' sets — intended.
+    - `session_queue_time` — pre-assignment queue wait (median 24 s, p90 1,276 s).
+    - `session_first_conv` (provider code) / `session_is_first_conv` (0/1) — code 1 = the
+      visitor's first conversation: 99.8% of code-1 sessions have no earlier session of the same
+      `id_visitor` (verified on `merged_session.csv`). 42.0% of sessions.
+    - `session_origin` (1/2/3: 58.2% / 41.7% / 0.2%) and `session_engagement_skill` (98.8% = 1)
+      — **codes undocumented**; ask the provider before interpreting.
+    - `session_id_initiator` (raw) / `session_initiator_type`: 0 = initiator id `1` (32.9%),
+      1 = this agent (51.1%), 2 = another agent (16.0%). **Meaning unconfirmed** — initiator 1
+      sessions are silent abandonment twice as often, so it may mark who opened the chat.
+    - `session_workload_at_assignment` — other sessions this agent had open when this session
+      was assigned: Stage 2's mask `queue_exit' < t <= chat_end'` at `t` = this session's
+      `queue_exit_time` (mean 4.30 vs `workload` at `T` 6.03). Brute-force verified on 300 rows.
+    - **Deliberately left out (look-ahead):** `outcome`, `transfer_agent`, `answer_nps`,
+      `answer_csat`, `chat_sentiment`, `score`, `average/min/max/last_sent`, `n_sent*`,
+      `total_*` / `visitor_*` / `agent_*` totals, `inner_wait`, `other_time`, `closer_time`,
+      `is_interactive`.
+
+    Steps 13–14 add 27 columns: `df_reg_ready_13_10_2026.csv` has **86 columns**; the 59
+    columns of `df_reg_ready_03_10_2026.csv` are byte-identical (verified), same 1,372,356 rows.
 
 **Which columns can be main effects.** clogit conditions on the stratum, so anything constant
 within a choice set drops out of the likelihood. Alternative-varying (usable): `FCFS`,
@@ -331,7 +387,11 @@ within a choice set drops out of the likelihood. Alternative-varying (usable): `
 `session_progress_pct_customers`, `session_progress_left_all_msg`, `session_progress_total_all_msg`, `session_progress_pct_all_msg`,
 `sentiment_type_turn` (categorical — enter as dummies, neutral = 3 as reference), and its
 ready-made dummy form `sentiment_positive` / `sentiment_negative` / `sentiment_neutral` (enter
-**two of the three** — the third is the reference).
+**two of the three** — the third is the reference). Also every per-session covariate of
+#13–#14: `first_msg_number_words/chars/lines/duration`, `first_msg_sentiment` (+ type / two of
+the three dummies), `first_msg_hour/day_band/is_night/dow`, `session_age`,
+`session_arrival_rank`, `session_queue_time`, `session_is_first_conv`, `session_origin`,
+`session_engagement_skill`, `session_initiator_type`, `session_workload_at_assignment`.
 Set-level — interactions or sample splits **only**: `set_size`,
 `prev_reply_gap`, `shift_id`, `time_in_shift`, `hour`, `day_band`, `is_night`, `dow`, and the
 pre-existing `workload`, `flag`, `chosen_time`, `id_rep`. Note `corr(workload, set_size) = 0.057` — open sessions and *waiting* sessions are nearly unrelated, so `workload` is not a

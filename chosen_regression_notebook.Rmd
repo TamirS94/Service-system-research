@@ -6,8 +6,12 @@ output: analyses_notebook
 [Libraries for working on the data]{.underline}
 
 ```{r}
-install.packages("ggplot2")
-install.packages("ggsurvfit")
+#install.packages("ggplot2")
+# install.packages("ggsurvfit")
+install.packages("dplyr")
+install.packages("survival")
+install.packages("stargazer")
+install.packages("psych")
 ```
 
 ```{r}
@@ -16,9 +20,14 @@ library(dplyr)
 library(survival)
 library(stargazer)
 library(ggsurvfit)
+
 #Reading the dataframe:
+
+df <- read.csv('df_reg_ready_03_10_2026.csv')
+```
+
+```{r}
 getwd()
-df <- read.csv('df_reg_20_8_choiceset_size.csv')
 ```
 
 [**Creating dummy variables:**]{.underline}
@@ -159,15 +168,20 @@ df$waiting_time_agent_hours <- df$waiting_time_agent / 3600
 [Model 1]{.underline} - 'waiting time by levels' with termination type, in the latest updated dataframe.
 
 ```{r}
-model_1 = clogit(chosen ~ ,data = df)
+model_1 = clogit(chosen ~ df$waiting_time_minutes + strata(choice_set) ,data = df)
 
 summary(model_1)
 ```
 
-[Model 2]{.underline} - 'waiting time by levels' without termination type, in the latest updated dataframe.
+Waiting time squared
 
 ```{r}
-model_2 = clogit(chosen ~ waiting_time_fifth_1 + waiting_time_fifth_2 + waiting_time_fifth_3 + waiting_time_fifth_4 + waiting_time_fifth_5  + msg_perc_fifth_1 + msg_perc_fifth_2 + msg_perc_fifth_3 + msg_perc_fifth_4 + msg_perc_fifth_5 + number_words_scaled + neg_sent + neut_sent + pos_sent + strata(choice_set),data = df_transfers_updated)
+
+df$waiting_time_squared = df$waiting_time ^ 2
+df$waiting_time_minutes = df$waiting_time / 60
+df$waiting_time_squared_minutes = df$waiting_time_minutes ^ 2
+
+model_2 = clogit(chosen ~ waiting_time_minutes + waiting_time_squared_minutes  + strata(choice_set) ,data = df)
 
 summary(model_2)
 ```
@@ -182,15 +196,14 @@ stargazer(model_1, model_2, type="text",  out="models.txt",
 [Model 3]{.underline} - rather than including termination_type as variable, do interactions with system_termination as dummy with all the fifths of msg perc and waiting time
 
 ```{r}
-model_3 = clogit(chosen ~ waiting_time_fifths * system_termination + msg_perc_fifths* system_termination + number_words_scaled + neg_sent + neut_sent + pos_sent + strata(choice_set),data = df_transfers_updated)
+model_3 = clogit(chosen ~ FCFS + strata(choice_set) ,data = df)
 
 summary(model_3)
 ```
 
 ```{r}
-model_3.5 = clogit(chosen ~ waiting_time_fifths + msg_perc_fifths * system_termination + number_words_scaled + neg_sent + neut_sent + pos_sent + strata(choice_set),data = df_transfers_updated)
-
-summary(model_3.5)
+stargazer(model_3, type="text",  out="models.txt", 
+          title = 'Waiting_time with and without Termination type, dfs with last msg')
 ```
 
 **Presenting model 3 in Stargazer:**
@@ -215,10 +228,10 @@ stargazer(model_4, type="text",  out="models.txt",
           title = 'System termination with all fifths of waiting time and msg_perc and binary csat')
 ```
 
-[Model 5]{.underline} - Comparing between different type of scores of satisfaction:
+[Model 5]{.underline} - Waiting time + rows left + control
 
 ```{r}
-model_5 = clogit(chosen ~ waiting_time_fifth_1 * terminated_by_factor + waiting_time_fifth_2 + waiting_time_fifth_3 + waiting_time_fifth_4 + waiting_time_fifth_5  + msg_perc_fifth_1 + msg_perc_fifth_2 + msg_perc_fifth_3 + msg_perc_fifth_4 + msg_perc_fifth_5 + number_words_scaled + neg_sent + neut_sent + pos_sent + answer_csat_cat + strata(choice_set),data = df_transfers_updated)
+model_5 = clogit(chosen ~ waiting_time * dow + waiting_time * hour + session_progress_left_all_msg * dow + session_progress_left_all_msg * hour + strata(choice_set),data = df)
 
 summary(model_5)
 ```
@@ -241,6 +254,12 @@ summary(model_6)
 ```{r}
 stargazer(model_6, type="text",  out="models.txt", 
           title = 'Basic model after fixing stickiness')
+```
+
+```{r}
+model_7 = clogit(chosen ~ waiting_time * dow + waiting_time * hour + session_progress_left_all_msg * dow + session_progress_left_all_msg * hour + waiting_time * session_progress_left_all_msg+ strata(choice_set),data = df)
+
+summary(model_7)
 ```
 
 # [**Survival models**]{.underline}
